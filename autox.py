@@ -260,24 +260,41 @@ class AutoXSession:
     
     async def _get_content_source(self):
         """获取内容源"""
-        # 如果有搜索关键词，使用搜索；否则使用时间线
-        if self.search_keywords:
-            # 选择一个关键词进行搜索
-            keyword = random.choice(self.search_keywords)
-            self.logger.info(f"Using search results for keyword: {keyword}")
-            await self.browser_manager.page.goto(f"https://x.com/search?q={keyword}")
-        elif self.config.target.keywords:
-            # 使用配置的关键词
-            keyword = random.choice(self.config.target.keywords)
-            self.logger.info(f"Using configured keyword: {keyword}")
-            await self.browser_manager.page.goto(f"https://x.com/search?q={keyword}")
-        else:
-            # 使用主页时间线
-            self.logger.info("Using home timeline")
-            await self.browser_manager.page.goto("https://x.com/home")
-        
-        await self.browser_manager.page.wait_for_load_state("networkidle")
-        return "timeline"
+        try:
+            # 检查页面是否仍然可用
+            if self.browser_manager.page.is_closed():
+                self.logger.error("页面已关闭，无法获取内容源")
+                raise Exception("页面已关闭")
+            
+            # 检查浏览器上下文是否仍然可用
+            try:
+                await self.browser_manager.page.title()
+            except Exception as e:
+                self.logger.error(f"页面不可用: {e}")
+                raise Exception(f"页面不可用: {e}")
+            
+            # 如果有搜索关键词，使用搜索；否则使用时间线
+            if self.search_keywords:
+                # 选择一个关键词进行搜索
+                keyword = random.choice(self.search_keywords)
+                self.logger.info(f"Using search results for keyword: {keyword}")
+                await self.browser_manager.page.goto(f"https://x.com/search?q={keyword}", timeout=30000)
+            elif self.config.target.keywords:
+                # 使用配置的关键词
+                keyword = random.choice(self.config.target.keywords)
+                self.logger.info(f"Using configured keyword: {keyword}")
+                await self.browser_manager.page.goto(f"https://x.com/search?q={keyword}", timeout=30000)
+            else:
+                # 使用主页时间线
+                self.logger.info("Using home timeline")
+                await self.browser_manager.page.goto("https://x.com/home", timeout=30000)
+            
+            await self.browser_manager.page.wait_for_load_state("networkidle", timeout=10000)
+            return "timeline"
+            
+        except Exception as e:
+            self.logger.error(f"获取内容源失败: {e}")
+            raise
     
     async def _get_content_items(self, source_type: str, action_type: ActionType) -> List[Dict[str, Any]]:
         """获取内容项"""
@@ -326,36 +343,57 @@ class AutoXSession:
             return []
     
     async def _extract_users_from_page(self) -> List[Dict[str, Any]]:
-        """从页面提取用户信息"""
+        """从页面提取用户信息（从推文中提取，包含互动数据）"""
         users = []
         try:
-            # 查找用户头像或用户名链接
-            user_elements = await self.browser_manager.page.locator('div[data-testid="User-Names"]').all()
+            # 对于关注操作，我们需要从推文中提取用户信息，这样才能获得互动数据
+            tweet_elements = await self.browser_manager.page.locator('article[data-testid="tweet"]').all()
             
-            for i, user_element in enumerate(user_elements[:5]):  # 限制数量
+            self.logger.debug(f"找到 {len(tweet_elements)} 个推文元素")
+            
+            for i, tweet_element in enumerate(tweet_elements[:10]):  # 限制数量
                 try:
-                    username_element = user_element.locator('span').first
-                    username = await username_element.text_content()
+                    # 提取推文数据（包含用户信息和互动数据）
+                    tweet_data = await self.twitter_client._extract_tweet_data(tweet_element)
                     
-                    if username:
+                    if tweet_data and tweet_data.get('username'):
+                        # 构建用户数据，包含推文的互动信息
                         user_data = {
-                            'username': username.strip(),
-                            'element': user_element,
-                            'id': f"user_{username.strip()}"
+                            'username': tweet_data.get('username', 'Unknown'),
+                            'display_name': tweet_data.get('display_name', 'Unknown'),
+                            'is_verified': tweet_data.get('is_verified', False),
+                            'element': tweet_element,  # 使用推文元素，因为关注按钮在推文中
+                            'id': f"user_{tweet_data.get('username', 'unknown')}",
+                            
+                            # 包含推文的互动数据用于条件检查
+                            'like_count': tweet_data.get('like_count', '0'),
+                            'retweet_count': tweet_data.get('retweet_count', '0'),
+                            'reply_count': tweet_data.get('reply_count', '0'),
+                            'view_count': tweet_data.get('view_count', '0'),
+                            'content': tweet_data.get('content', ''),
+                            'has_images': tweet_data.get('has_images', False),
+                            'has_video': tweet_data.get('has_video', False),
+                            'has_gif': tweet_data.get('has_gif', False)
                         }
-                        users.append(user_data)
                         
-                        # 创建可序列化的数据副本（排除Locator对象）
-                        serializable_data = {
-                            key: value for key, value in user_data.items() 
-                            if key != 'element'  # 排除Locator对象
-                        }
-                        
-                        # 记录发现的目标
-                        self.data_manager.record_target("user", user_data['id'], serializable_data)
+                        # 避免重复用户
+                        existing_usernames = [u.get('username') for u in users]
+                        if user_data['username'] not in existing_usernames:
+                            users.append(user_data)
+                            
+                            # 创建可序列化的数据副本（排除Locator对象）
+                            serializable_data = {
+                                key: value for key, value in user_data.items() 
+                                if key != 'element'
+                            }
+                            
+                            # 记录发现的目标
+                            self.data_manager.record_target("user", user_data['id'], serializable_data)
+                            
+                            self.logger.debug(f"提取用户: {user_data['username']}, 推文赞数: {user_data['like_count']}")
                         
                 except Exception as e:
-                    self.logger.debug(f"Error extracting user {i}: {e}")
+                    self.logger.debug(f"Error extracting user from tweet {i}: {e}")
                     continue
             
             self.logger.debug(f"Extracted {len(users)} users from page")
@@ -364,6 +402,188 @@ class AutoXSession:
         except Exception as e:
             self.logger.error(f"Error extracting users: {e}")
             return []
+    
+    async def _extract_user_info(self, user_element, strategy: str) -> Optional[Dict[str, Any]]:
+        """从用户元素提取用户信息"""
+        try:
+            user_data = {
+                'username': 'Unknown',
+                'display_name': 'Unknown',
+                'is_verified': False,
+                'element': user_element,
+                'id': 'unknown'
+            }
+            
+            # 根据不同策略提取用户信息
+            if 'User-Name' in strategy:
+                # 从用户名区域提取
+                await self._extract_from_user_name_area(user_element, user_data)
+            elif 'href' in strategy:
+                # 从链接提取
+                await self._extract_from_user_link(user_element, user_data)
+            elif 'Avatar' in strategy:
+                # 从头像容器提取
+                await self._extract_from_avatar_container(user_element, user_data)
+            elif '@' in strategy:
+                # 从@用户名提取
+                await self._extract_from_at_mention(user_element, user_data)
+            else:
+                # 通用提取方法
+                await self._extract_user_info_generic(user_element, user_data)
+            
+            # 验证提取的数据
+            if user_data['username'] != 'Unknown' and user_data['username']:
+                user_data['id'] = f"user_{user_data['username']}"
+                return user_data
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"提取用户信息失败: {e}")
+            return None
+    
+    async def _extract_from_user_name_area(self, user_element, user_data: Dict[str, Any]):
+        """从用户名区域提取信息"""
+        try:
+            # 显示名称
+            display_name_selectors = ['span', 'div', 'a']
+            for selector in display_name_selectors:
+                try:
+                    name_elements = user_element.locator(selector)
+                    count = await name_elements.count()
+                    for i in range(min(count, 3)):
+                        text = await name_elements.nth(i).text_content()
+                        if text and text.strip() and not text.startswith('@') and len(text.strip()) > 1:
+                            user_data['display_name'] = text.strip()
+                            break
+                    if user_data['display_name'] != 'Unknown':
+                        break
+                except Exception as e:
+                    self.logger.debug(f"获取显示名失败 {selector}: {e}")
+                    continue
+            
+            # 用户名（@handle）
+            handle_selectors = ['span:has-text("@")', 'a[href^="/"]']
+            for selector in handle_selectors:
+                try:
+                    handle_elements = user_element.locator(selector)
+                    count = await handle_elements.count()
+                    for i in range(count):
+                        if selector == 'a[href^="/"]':
+                            href = await handle_elements.nth(i).get_attribute('href')
+                            if href and href.startswith('/') and len(href) > 1:
+                                username = href[1:].split('/')[0]
+                                if username and len(username) > 0:
+                                    user_data['username'] = username
+                                    break
+                        else:
+                            text = await handle_elements.nth(i).text_content()
+                            if text and '@' in text:
+                                username = text.replace('@', '').strip()
+                                if username and len(username) > 0:
+                                    user_data['username'] = username
+                                    break
+                    if user_data['username'] != 'Unknown':
+                        break
+                except Exception as e:
+                    self.logger.debug(f"获取用户名失败 {selector}: {e}")
+                    continue
+            
+            # 验证标识
+            try:
+                verified_element = user_element.locator('svg[data-testid="icon-verified"]')
+                user_data['is_verified'] = await verified_element.count() > 0
+            except Exception as e:
+                self.logger.debug(f"获取验证状态失败: {e}")
+                
+        except Exception as e:
+            self.logger.debug(f"从用户名区域提取失败: {e}")
+    
+    async def _extract_from_user_link(self, user_element, user_data: Dict[str, Any]):
+        """从用户链接提取信息"""
+        try:
+            href = await user_element.get_attribute('href')
+            if href and href.startswith('/') and len(href) > 1:
+                username = href[1:].split('/')[0]
+                if username and len(username) > 0 and username not in ['i', 'home', 'search', 'notifications']:
+                    user_data['username'] = username
+                    
+                    # 尝试获取显示名称
+                    try:
+                        text = await user_element.text_content()
+                        if text and text.strip() and not text.startswith('@'):
+                            user_data['display_name'] = text.strip()
+                    except Exception as e:
+                        self.logger.debug(f"获取链接显示名失败: {e}")
+                        
+        except Exception as e:
+            self.logger.debug(f"从用户链接提取失败: {e}")
+    
+    async def _extract_from_avatar_container(self, user_element, user_data: Dict[str, Any]):
+        """从头像容器提取信息"""
+        try:
+            # 查找相邻的用户名信息
+            parent = user_element.locator('xpath=..')
+            user_name_element = parent.locator('div[data-testid="User-Name"]')
+            
+            if await user_name_element.count() > 0:
+                await self._extract_from_user_name_area(user_name_element.first, user_data)
+                
+        except Exception as e:
+            self.logger.debug(f"从头像容器提取失败: {e}")
+    
+    async def _extract_from_at_mention(self, user_element, user_data: Dict[str, Any]):
+        """从@提及提取信息"""
+        try:
+            text = await user_element.text_content()
+            if text and '@' in text:
+                username = text.replace('@', '').strip()
+                if username and len(username) > 0:
+                    user_data['username'] = username
+                    user_data['display_name'] = text.strip()
+                    
+        except Exception as e:
+            self.logger.debug(f"从@提及提取失败: {e}")
+    
+    async def _extract_user_info_generic(self, user_element, user_data: Dict[str, Any]):
+        """通用用户信息提取方法"""
+        try:
+            # 尝试获取所有文本内容并解析
+            text = await user_element.text_content()
+            if text:
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                
+                for line in lines:
+                    if '@' in line and len(line) > 1:
+                        username = line.replace('@', '').strip()
+                        if username and len(username) > 0:
+                            user_data['username'] = username
+                            break
+                
+                # 如果没有找到@用户名，尝试从href获取
+                if user_data['username'] == 'Unknown':
+                    try:
+                        links = user_element.locator('a[href^="/"]')
+                        count = await links.count()
+                        for i in range(count):
+                            href = await links.nth(i).get_attribute('href')
+                            if href and href.startswith('/') and len(href) > 1:
+                                username = href[1:].split('/')[0]
+                                if username and len(username) > 0 and username not in ['i', 'home', 'search', 'notifications']:
+                                    user_data['username'] = username
+                                    break
+                    except Exception as e:
+                        self.logger.debug(f"从href获取用户名失败: {e}")
+                
+                # 设置显示名称
+                if lines and user_data['display_name'] == 'Unknown':
+                    for line in lines:
+                        if not line.startswith('@') and len(line) > 1 and len(line) < 50:
+                            user_data['display_name'] = line
+                            break
+                            
+        except Exception as e:
+            self.logger.debug(f"通用用户信息提取失败: {e}")
     
     async def _execute_action_on_item(self, action_config, item) -> ActionResult:
         """在项目上执行行为"""

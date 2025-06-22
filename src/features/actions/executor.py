@@ -257,31 +257,32 @@ class ActionExecutor:
                 self.logger.error("页面不可用，跳过关注操作")
                 return ActionResult.ERROR
             
-            # 使用多种策略查找关注按钮
-            follow_button = None
-            follow_selectors = [
-                'div[data-testid*="follow"]:not([data-testid*="unfollow"])',
-                '[data-testid*="follow"]:not([data-testid*="unfollow"])',
-                'button[data-testid*="follow"]:not([data-testid*="unfollow"])',
-                'div[role="button"]:has-text("Follow")',
-                'div[role="button"]:has-text("关注")',
-                'button:has-text("Follow")',
-                'button:has-text("关注")'
-            ]
+            username = user_info.get('username', 'unknown')
+            self.logger.debug(f"准备关注用户: {username}")
             
-            for selector in follow_selectors:
+            # 策略1: 先在当前页面查找关注按钮
+            follow_button = await self._find_follow_button_on_current_page(user_element, username)
+            
+            # 策略2: 如果当前页面没有找到，导航到用户资料页面
+            if not follow_button:
+                self.logger.debug(f"当前页面未找到关注按钮，导航到用户资料页面: {username}")
+                
+                # 导航到用户资料页面
                 try:
-                    button = user_element.locator(selector).first
-                    if await button.count() > 0:
-                        follow_button = button
-                        self.logger.debug(f"找到关注按钮，使用选择器: {selector}")
-                        break
+                    profile_url = f"https://x.com/{username}"
+                    await self.page.goto(profile_url, timeout=10000)
+                    await self.page.wait_for_load_state("networkidle", timeout=5000)
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
+                    
+                    # 在资料页面查找关注按钮
+                    follow_button = await self._find_follow_button_on_profile_page()
+                    
                 except Exception as e:
-                    self.logger.debug(f"关注选择器失败 {selector}: {e}")
-                    continue
+                    self.logger.error(f"导航到用户资料页面失败: {e}")
+                    return ActionResult.FAILED
             
             if not follow_button:
-                self.logger.warning("未找到关注按钮")
+                self.logger.warning(f"未找到用户 {username} 的关注按钮")
                 return ActionResult.FAILED
             
             # 检查按钮状态
@@ -291,40 +292,138 @@ class ActionExecutor:
                     button_text_lower = button_text.lower()
                     # 如果已经关注，跳过
                     if any(word in button_text_lower for word in ['following', 'unfollow', '已关注', '取消关注']):
-                        self.logger.info(f"已关注用户: {user_info.get('username', 'unknown')}")
+                        self.logger.info(f"已关注用户: {username}")
                         return ActionResult.SKIPPED
+                    
+                    self.logger.debug(f"关注按钮文本: {button_text}")
             except Exception as e:
                 self.logger.debug(f"检查关注状态失败: {e}")
             
             # 执行关注
             try:
                 await follow_button.click(timeout=5000)
-                self.logger.debug("关注按钮点击成功")
+                self.logger.debug(f"关注按钮点击成功: {username}")
             except Exception as e:
                 self.logger.error(f"点击关注按钮失败: {e}")
                 return ActionResult.FAILED
             
             # 等待反馈确认
-            await asyncio.sleep(random.uniform(1.0, 2.0))
+            await asyncio.sleep(random.uniform(1.5, 3.0))
             
-            # 验证关注是否成功（可选）
+            # 验证关注是否成功
             try:
-                updated_text = await follow_button.text_content(timeout=2000)
-                if updated_text and any(word in updated_text.lower() for word in ['following', 'unfollow', '已关注']):
-                    self.logger.info(f"关注成功: {user_info.get('username', 'unknown')}")
-                    return ActionResult.SUCCESS
-                else:
-                    # 即使验证失败，也认为可能成功了
-                    self.logger.info(f"关注操作完成: {user_info.get('username', 'unknown')}")
-                    return ActionResult.SUCCESS
+                # 重新查找按钮以获取最新状态
+                updated_button = await self._find_follow_button_on_profile_page()
+                if updated_button:
+                    updated_text = await updated_button.text_content(timeout=2000)
+                    if updated_text and any(word in updated_text.lower() for word in ['following', 'unfollow', '已关注']):
+                        self.logger.info(f"关注成功: {username}")
+                        return ActionResult.SUCCESS
+                
+                # 即使验证失败，也认为可能成功了
+                self.logger.info(f"关注操作完成: {username}")
+                return ActionResult.SUCCESS
+                
             except Exception as e:
                 self.logger.debug(f"验证关注状态失败: {e}")
-                self.logger.info(f"关注操作完成: {user_info.get('username', 'unknown')}")
+                self.logger.info(f"关注操作完成: {username}")
                 return ActionResult.SUCCESS
             
         except Exception as e:
             self.logger.error(f"关注操作失败: {e}")
             return ActionResult.ERROR
+    
+    async def _find_follow_button_on_current_page(self, user_element: Any, username: str) -> Any:
+        """在当前页面查找关注按钮"""
+        try:
+            # 在用户元素附近查找关注按钮
+            follow_selectors = [
+                # 在用户元素内查找
+                'div[data-testid*="follow"]:not([data-testid*="unfollow"])',
+                '[data-testid*="follow"]:not([data-testid*="unfollow"])',
+                'button[data-testid*="follow"]:not([data-testid*="unfollow"])',
+                'div[role="button"]:has-text("Follow")',
+                'div[role="button"]:has-text("关注")',
+                'button:has-text("Follow")',
+                'button:has-text("关注")',
+                
+                # 在用户元素的父级容器中查找
+                'xpath=ancestor::article//div[data-testid*="follow"]',
+                'xpath=ancestor::div[contains(@class,"user")]//button[contains(text(),"Follow")]'
+            ]
+            
+            for selector in follow_selectors:
+                try:
+                    if selector.startswith('xpath='):
+                        # 使用xpath选择器
+                        button = user_element.locator(selector)
+                    else:
+                        # 先在用户元素内查找
+                        button = user_element.locator(selector).first
+                        
+                        # 如果用户元素内没有，在页面范围内查找
+                        if await button.count() == 0:
+                            button = self.page.locator(selector).first
+                    
+                    if await button.count() > 0:
+                        self.logger.debug(f"在当前页面找到关注按钮，使用选择器: {selector}")
+                        return button
+                        
+                except Exception as e:
+                    self.logger.debug(f"关注选择器失败 {selector}: {e}")
+                    continue
+                    
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"在当前页面查找关注按钮失败: {e}")
+            return None
+    
+    async def _find_follow_button_on_profile_page(self) -> Any:
+        """在用户资料页面查找关注按钮"""
+        try:
+            # 资料页面的关注按钮选择器
+            profile_follow_selectors = [
+                'div[data-testid="follow"]',
+                '[data-testid="follow"]',
+                'button[data-testid="follow"]',
+                'div[role="button"]:has-text("Follow")',
+                'div[role="button"]:has-text("关注")',
+                'button:has-text("Follow")',
+                'button:has-text("关注")',
+                'div[aria-label*="Follow"]',
+                'button[aria-label*="Follow"]',
+                
+                # 更通用的选择器
+                'div[role="button"][data-testid*="follow"]',
+                'button[data-testid*="follow"]',
+                'div:has-text("Follow")',
+                'button:has-text("Follow")'
+            ]
+            
+            for selector in profile_follow_selectors:
+                try:
+                    button = self.page.locator(selector).first
+                    if await button.count() > 0:
+                        # 验证这确实是关注按钮
+                        try:
+                            text = await button.text_content(timeout=2000)
+                            if text and ('follow' in text.lower() or '关注' in text):
+                                self.logger.debug(f"在资料页面找到关注按钮，使用选择器: {selector}, 文本: {text}")
+                                return button
+                        except Exception as e:
+                            self.logger.debug(f"验证按钮文本失败: {e}")
+                            continue
+                            
+                except Exception as e:
+                    self.logger.debug(f"资料页面关注选择器失败 {selector}: {e}")
+                    continue
+                    
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"在资料页面查找关注按钮失败: {e}")
+            return None
     
     async def _execute_comment(self, tweet_element: Any, tweet_info: Dict[str, Any], 
                              action_config: ActionConfig) -> ActionResult:

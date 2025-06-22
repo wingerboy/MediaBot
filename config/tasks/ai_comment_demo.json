@@ -18,7 +18,7 @@
     },
     {
       "action_type": "comment",
-      "count": 5,
+      "count": 0,
       "min_interval": 15.0,
       "max_interval": 30.0,
       "enabled": true,

@@ -1,0 +1,32 @@
+{
+  "session_id": "follow_test",
+  "name": "关注功能测试",
+  "description": "专门测试关注功能的配置",
+  "actions": [
+    {
+      "action_type": "follow",
+      "count": 2,
+      "min_interval": 10.0,
+      "max_interval": 20.0,
+      "enabled": true,
+      "conditions": {
+        "min_like_count": 10,
+        "min_view_count": 100,
+        "min_content_length": 20,
+        "verified_only": null
+      }
+    }
+  ],
+  "target": {
+    "keywords": ["AI", "人工智能", "技术", "科技", "机器学习"],
+    "hashtags": ["#AI", "#Tech"],
+    "languages": ["en", "zh"],
+    "min_likes": 5,
+    "max_age_hours": 24,
+    "exclude_keywords": ["广告", "spam"]
+  },
+  "max_duration_minutes": 10,
+  "max_total_actions": 5,
+  "randomize_intervals": true,
+  "respect_rate_limits": true
+} 
