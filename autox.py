@@ -6,6 +6,7 @@ import asyncio
 import sys
 import argparse
 import uuid
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -18,6 +19,7 @@ from src.core.twitter.client import TwitterClient
 from src.features.browse.timeline import TimelineBrowser
 from src.features.actions.executor import ActionExecutor, ContentFilter
 from src.config.task_config import SessionConfig, config_manager, ActionType
+from src.services.ai_service import AIConfig
 from src.utils.session_logger import get_session_logger, SessionLogger
 from src.utils.session_data import SessionDataManager, ActionResult
 from config.settings import settings
@@ -57,10 +59,25 @@ class AutoXSession:
             self.browser_manager = BrowserManager()
             await self.browser_manager.start()
             
+            # 创建AI配置（如果有API密钥）
+            ai_config = None
+            if settings.DEEPSEEK_API_KEY:
+                ai_config = AIConfig(
+                    api_key=settings.DEEPSEEK_API_KEY,
+                    base_url=settings.DEEPSEEK_BASE_URL,
+                    model=settings.DEEPSEEK_MODEL,
+                    temperature=settings.DEEPSEEK_TEMPERATURE,
+                    max_tokens=settings.DEEPSEEK_MAX_TOKENS,
+                    timeout=settings.DEEPSEEK_TIMEOUT
+                )
+                self.logger.info("AI配置已创建，支持智能评论生成")
+            else:
+                self.logger.info("未配置DeepSeek API密钥，将使用模板评论")
+            
             # 初始化客户端
             self.twitter_client = TwitterClient(self.browser_manager.page)
             self.timeline_browser = TimelineBrowser(self.browser_manager)
-            self.action_executor = ActionExecutor(self.browser_manager.page, self.session_id)
+            self.action_executor = ActionExecutor(self.browser_manager.page, self.session_id, ai_config)
             self.content_filter = ContentFilter(self.session_id)
             
             self.is_running = True
@@ -246,7 +263,6 @@ class AutoXSession:
         # 如果有搜索关键词，使用搜索；否则使用时间线
         if self.search_keywords:
             # 选择一个关键词进行搜索
-            import random
             keyword = random.choice(self.search_keywords)
             self.logger.info(f"Using search results for keyword: {keyword}")
             await self.browser_manager.page.goto(f"https://x.com/search?q={keyword}")

@@ -37,6 +37,14 @@ class Settings:
         self.ENABLE_STEALTH = os.getenv("ENABLE_STEALTH", "True").lower() == "true"
         self.RANDOMIZE_BEHAVIOR = os.getenv("RANDOMIZE_BEHAVIOR", "True").lower() == "true"
         
+        # DeepSeek AI配置
+        self.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+        self.DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        self.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self.DEEPSEEK_TEMPERATURE = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.7"))
+        self.DEEPSEEK_MAX_TOKENS = int(os.getenv("DEEPSEEK_MAX_TOKENS", "100"))
+        self.DEEPSEEK_TIMEOUT = int(os.getenv("DEEPSEEK_TIMEOUT", "30"))
+        
         # 确保目录存在
         self.DATA_DIR.mkdir(exist_ok=True)
         self.LOGS_DIR.mkdir(exist_ok=True)

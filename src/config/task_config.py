@@ -26,6 +26,8 @@ class ActionConfig:
     
     # 评论相关参数
     comment_templates: List[str] = field(default_factory=list)
+    use_ai_comment: bool = False       # 是否使用AI生成评论
+    ai_comment_fallback: bool = True   # AI失败时是否使用模板备用
     
     # 关注相关参数
     follow_back_ratio: float = 0.3     # 关注回关率
@@ -42,6 +44,8 @@ class ActionConfig:
             'max_interval': self.max_interval,
             'enabled': self.enabled,
             'comment_templates': self.comment_templates,
+            'use_ai_comment': self.use_ai_comment,
+            'ai_comment_fallback': self.ai_comment_fallback,
             'follow_back_ratio': self.follow_back_ratio,
             'conditions': self.conditions
         }

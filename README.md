@@ -159,32 +159,65 @@ python autox.py --config my_task --session-id my_session_001
 - `retweet`: 转发
 - `browse`: 浏览
 
-### 条件判断参数
+### 🎯 条件判断系统
+
+MediaBot的核心特性是智能条件判断，每个行为都可以设置精确的执行条件：
+
+#### 支持的条件类型
 ```json
 "conditions": {
+  // 互动数据条件
   "min_like_count": 10,           // 最小点赞数
   "max_like_count": 5000,         // 最大点赞数
+  "min_retweet_count": 5,         // 最小转发数
+  "max_retweet_count": 1000,      // 最大转发数
+  "min_reply_count": 2,           // 最小回复数
+  "max_reply_count": 100,         // 最大回复数
   "min_view_count": 100,          // 最小浏览量
-  "verified_only": false,         // 仅验证用户
-  "has_media": true,              // 包含媒体
-  "min_content_length": 20        // 最小内容长度
+  "max_view_count": 50000,        // 最大浏览量
+  
+  // 用户条件
+  "verified_only": null,          // 仅验证用户 (true/false/null)
+  "exclude_verified": false,      // 排除验证用户 (true/false/null)
+  "min_follower_count": 100,      // 最小粉丝数
+  "max_follower_count": 100000,   // 最大粉丝数
+  
+  // 内容条件
+  "min_content_length": 20,       // 最小内容长度
+  "max_content_length": 280,      // 最大内容长度
+  "has_media": null,              // 是否包含媒体 (true/false/null)
+  "media_types": ["image", "video"], // 特定媒体类型
+  
+  // 时间条件
+  "max_age_hours": 24            // 最大发布时间（小时）
 }
 ```
 
+#### 条件值说明
+- **数字条件**: 设置具体数值，不设置或设为 `null` 表示不限制
+- **布尔条件**: 
+  - `true`: 必须满足条件
+  - `false`: 必须不满足条件  
+  - `null`: 不限制
+- **数组条件**: 列表形式，如 `["image", "video"]`
+
 ## 📊 使用示例
 
-### 示例1: 基础点赞任务
+### 示例1: 精准点赞任务
 ```json
 {
-  "session_id": "basic_like",
-  "name": "基础点赞任务",
+  "session_id": "precise_like",
+  "name": "精准点赞任务",
   "actions": [
     {
       "action_type": "like",
       "count": 30,
       "conditions": {
-        "min_like_count": 5,
-        "min_view_count": 50
+        "min_like_count": 5,        // 至少5个赞
+        "max_like_count": 1000,     // 最多1000个赞
+        "min_view_count": 50,       // 至少50次浏览
+        "min_content_length": 20,   // 内容至少20字符
+        "has_media": null           // 不限制是否有媒体
       }
     }
   ]
@@ -201,9 +234,12 @@ python autox.py --config my_task --session-id my_session_001
       "action_type": "follow",
       "count": 10,
       "conditions": {
-        "min_like_count": 100,
-        "verified_only": false,
-        "min_content_length": 50
+        "min_like_count": 100,      // 高互动内容的作者
+        "min_view_count": 500,      // 高曝光内容
+        "min_content_length": 50,   // 有实质内容
+        "verified_only": false,     // 不限制仅验证用户
+        "exclude_verified": false,  // 不排除验证用户
+        "has_media": true          // 有媒体内容的推文
       }
     }
   ]
@@ -225,10 +261,50 @@ python autox.py --config my_task --session-id my_session_001
         "Great insights! 🚀"
       ],
       "conditions": {
-        "min_like_count": 20,
-        "max_like_count": 2000,
-        "min_reply_count": 2
+        "min_like_count": 20,       // 有一定热度
+        "max_like_count": 2000,     // 避免过热话题
+        "min_reply_count": 2,       // 已有讨论
+        "max_reply_count": 50,      // 讨论不过于激烈
+        "min_content_length": 30,   // 有实质内容
+        "has_media": false          // 优先纯文本内容
       }
+    }
+  ]
+}
+```
+
+### 示例4: 选择性转发任务
+```json
+{
+  "session_id": "selective_retweet",
+  "name": "选择性转发",
+  "actions": [
+    {
+      "action_type": "retweet",
+      "count": 3,
+      "conditions": {
+        "min_like_count": 200,      // 高质量内容
+        "min_retweet_count": 20,    // 已有转发
+        "min_view_count": 1000,     // 高曝光
+        "verified_only": true,      // 仅验证用户
+        "has_media": true,          // 包含媒体
+        "media_types": ["image", "video"]  // 特定媒体类型
+      }
+    }
+  ]
+}
+```
+
+### 示例5: 无条件执行（默认行为）
+```json
+{
+  "session_id": "no_conditions",
+  "name": "无条件执行",
+  "actions": [
+    {
+      "action_type": "like",
+      "count": 15,
+      "conditions": {}  // 空条件对象，按默认方式执行
     }
   ]
 }
@@ -296,6 +372,25 @@ export LOG_LEVEL=DEBUG
 python autox.py --config my_task
 ```
 
+### 条件调试
+查看条件判断详情：
+```bash
+# 运行任务并查看条件判断日志
+python autox.py --config conditional_engagement
+```
+
+日志示例：
+```
+条件检查失败 [like] @username - 赞:8 转:1 回:0 看:45 长度:15 验证:false
+条件检查成功 [like] @username - 赞:25 转:3 回:2 看:150 长度:45 验证:false
+```
+
+## 📚 相关文档
+
+- [条件判断详细指南](docs/CONDITIONS_GUIDE.md) - 深入了解条件配置
+- [配置示例集合](config/tasks/) - 各种场景的配置模板
+- [贡献指南](CONTRIBUTING.md) - 如何参与项目开发
+
 ## ⚠️ 注意事项
 
 ### 使用须知
@@ -303,6 +398,11 @@ python autox.py --config my_task
 2. **适度使用**: 建议设置合理的操作频率和数量
 3. **账号安全**: 使用小号测试，避免主账号风险
 4. **网络环境**: 建议使用稳定的网络环境
+
+### 条件设置建议
+- **新手**: 使用较宽松的条件，如 `basic_engagement` 配置
+- **进阶**: 使用中等条件，如 `conditional_engagement` 配置
+- **专家**: 自定义严格条件，精确控制互动质量
 
 ### 风险提示
 - 自动化操作可能违反平台规则
@@ -333,7 +433,7 @@ python autox.py --config my_task
 
 ### v1.0.0 (Latest)
 - ✅ 基础自动化功能
-- ✅ 条件判断系统
+- ✅ 智能条件判断系统
 - ✅ 配置化任务管理
 - ✅ 会话记录和统计
 - ✅ 反检测机制
