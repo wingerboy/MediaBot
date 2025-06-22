@@ -22,15 +22,17 @@ from src.config.task_config import SessionConfig, config_manager, ActionType
 from src.services.ai_service import AIConfig
 from src.utils.session_logger import get_session_logger, SessionLogger
 from src.utils.session_data import SessionDataManager, ActionResult
+from src.core.account.manager import AccountConfig, account_manager
 from config.settings import settings
 
 class AutoXSession:
     """AutoX自动化会话"""
     
-    def __init__(self, session_config: SessionConfig, search_keywords: Optional[List[str]] = None):
+    def __init__(self, session_config: SessionConfig, search_keywords: Optional[List[str]] = None, account_config: Optional[AccountConfig] = None):
         self.config = session_config
         self.session_id = session_config.session_id
         self.search_keywords = search_keywords or []
+        self.account_config = account_config  # 新增账号配置
         
         # 初始化组件
         self.logger = get_session_logger(self.session_id)
@@ -55,9 +57,22 @@ class AutoXSession:
             self.logger.info(f"Task Name: {self.config.name}")
             self.logger.info(f"Description: {self.config.description}")
             
+            # 账号信息
+            if self.account_config:
+                self.logger.info(f"Account: {self.account_config.account_id} (@{self.account_config.username})")
+                self.logger.info(f"Display Name: {self.account_config.display_name}")
+            
             # 启动浏览器
             self.browser_manager = BrowserManager()
             await self.browser_manager.start()
+            
+            # 加载账号cookies（如果配置了账号）
+            if self.account_config and Path(self.account_config.cookies_file).exists():
+                try:
+                    await self.browser_manager.load_cookies(self.account_config.cookies_file)
+                    self.logger.info(f"Loaded cookies from: {self.account_config.cookies_file}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to load cookies: {e}")
             
             # 创建AI配置（如果有API密钥）
             ai_config = None
@@ -94,15 +109,32 @@ class AutoXSession:
             # 检查登录状态
             if not await self.twitter_client.check_login_status():
                 self.logger.info("Need to login, starting login process...")
-                # 这里可以选择自动登录或提示手动登录
-                login_success = await self.twitter_client.login(
-                    username=settings.TWITTER_USERNAME,
-                    password=settings.TWITTER_PASSWORD,
-                    email=settings.TWITTER_EMAIL
-                )
+                
+                # 使用账号配置或默认设置登录
+                if self.account_config:
+                    login_success = await self.twitter_client.login(
+                        username=self.account_config.username,
+                        password=self.account_config.password,
+                        email=self.account_config.email
+                    )
+                else:
+                    login_success = await self.twitter_client.login(
+                        username=settings.TWITTER_USERNAME,
+                        password=settings.TWITTER_PASSWORD,
+                        email=settings.TWITTER_EMAIL
+                    )
+                
                 if not login_success:
                     self.logger.error("Login failed, cannot continue")
                     return
+                
+                # 保存cookies（如果配置了账号）
+                if self.account_config:
+                    try:
+                        await self.browser_manager.save_cookies(self.account_config.cookies_file)
+                        self.logger.info(f"Saved cookies to: {self.account_config.cookies_file}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to save cookies: {e}")
             
             # 开始执行配置的任务
             await self._execute_configured_actions()
@@ -113,69 +145,57 @@ class AutoXSession:
             await self.close()
     
     async def _execute_configured_actions(self):
-        """执行配置的行为"""
+        """执行配置的行为 - 对每条推文执行所有启用的动作"""
         self.logger.info("Starting configured actions execution")
         
         # 计算总的时间限制
         max_end_time = self.start_time + timedelta(minutes=self.config.max_duration_minutes)
         
-        for action_config in self.config.actions:
-            if not action_config.enabled:
-                self.logger.info(f"Skipping disabled action: {action_config.action_type.value}")
-                continue
-            
-            await self._execute_single_action_type(action_config, max_end_time)
-            
-            # 检查是否超过总行为限制
-            if self.total_actions >= self.config.max_total_actions:
-                self.logger.info(f"Reached maximum total actions limit: {self.config.max_total_actions}")
-                break
-            
-            # 检查时间限制
-            if datetime.now() >= max_end_time:
-                self.logger.info("Reached maximum session duration")
-                break
-    
-    async def _execute_single_action_type(self, action_config, max_end_time):
-        """执行单一类型的行为"""
-        action_type = action_config.action_type
-        target_count = action_config.count
-        
-        self.logger.info(f"Executing {action_type.value} actions (target: {target_count})")
-        
-        # 获取内容源
-        try:
-            content_source = await self._get_content_source()
-        except Exception as e:
-            self.logger.error(f"Error getting content source: {e}")
+        # 获取所有启用的动作配置
+        enabled_actions = [action for action in self.config.actions if action.enabled]
+        if not enabled_actions:
+            self.logger.warning("No enabled actions found")
             return
         
-        executed_count = 0
+        self.logger.info(f"Enabled actions: {[action.action_type.value for action in enabled_actions]}")
+        
+        # 计算每种动作的剩余配额
+        action_quotas = {
+            action.action_type: action.count for action in enabled_actions
+        }
+        
         processed_items = set()  # 防止重复处理
         
-        while (executed_count < target_count and 
-               self.total_actions < self.config.max_total_actions and
-               datetime.now() < max_end_time):
+        try:
+            # 获取内容源
+            content_source = await self._get_content_source()
             
-            try:
-                # 检查是否应该继续
-                if not self.is_running:
-                    break
+            while (self.total_actions < self.config.max_total_actions and
+                   datetime.now() < max_end_time and
+                   self.is_running and
+                   any(quota > 0 for quota in action_quotas.values())):
                 
-                # 获取内容项
-                content_items = await self._get_content_items(content_source, action_type)
+                # 获取推文内容
+                content_items = await self._extract_tweets_from_page()
                 
                 if not content_items:
-                    self.logger.warning(f"No content items found for {action_type.value}")
-                    break
+                    self.logger.warning("No content items found")
+                    # 尝试滚动获取更多内容
+                    try:
+                        await self._scroll_for_more_content()
+                        await asyncio.sleep(2)
+                        continue
+                    except Exception as e:
+                        self.logger.debug(f"Error scrolling: {e}")
+                        break
                 
-                # 处理每个内容项
+                # 处理每个推文
                 for item in content_items:
-                    # 再次检查运行状态和限制
-                    if (executed_count >= target_count or 
-                        self.total_actions >= self.config.max_total_actions or
+                    # 检查运行状态和限制
+                    if (self.total_actions >= self.config.max_total_actions or
                         datetime.now() >= max_end_time or
-                        not self.is_running):
+                        not self.is_running or
+                        all(quota <= 0 for quota in action_quotas.values())):
                         break
                     
                     item_id = item.get('id') or item.get('url', str(hash(str(item))))
@@ -192,54 +212,96 @@ class AutoXSession:
                         self.logger.debug(f"Error in content filter: {e}")
                         continue
                     
-                    # 执行行为
-                    try:
-                        result = await self._execute_action_on_item(action_config, item)
-                        
-                        if result == ActionResult.SUCCESS:
-                            executed_count += 1
-                            self.action_counts[action_type.value] += 1
-                            self.total_actions += 1
-                        
-                        # 记录行为
-                        # 创建可序列化的details（排除Locator对象）
-                        serializable_details = {
-                            key: value for key, value in item.items() 
-                            if key != 'element'  # 排除Locator对象
-                        }
-                        
-                        self.data_manager.record_action(
-                            action_type=action_type.value,
-                            target_type="tweet" if action_type in [ActionType.LIKE, ActionType.RETWEET, ActionType.COMMENT] else "user",
-                            target_id=item_id,
-                            result=result,
-                            details=serializable_details
-                        )
-                        
-                    except Exception as e:
-                        self.logger.error(f"Error executing action on item {item_id}: {e}")
-                        continue
+                    self.logger.info(f"Processing tweet from @{item.get('username', 'Unknown')}: {item.get('content', '')[:50]}...")
                     
-                    # 行为间隔
-                    try:
-                        if self.config.randomize_intervals:
-                            await self.action_executor.random_delay(
-                                action_config.min_interval,
-                                action_config.max_interval
-                            )
+                    # 对这条推文执行所有启用的动作
+                    tweet_actions_executed = 0
+                    
+                    for action_config in enabled_actions:
+                        # 检查该动作是否还有配额
+                        if action_quotas[action_config.action_type] <= 0:
+                            continue
+                        
+                        # 检查时间和总数限制
+                        if (self.total_actions >= self.config.max_total_actions or
+                            datetime.now() >= max_end_time or
+                            not self.is_running):
+                            break
+                        
+                        # 对于follow动作，需要特殊处理（从推文提取用户信息）
+                        if action_config.action_type == ActionType.FOLLOW:
+                            # 构造用户信息用于follow动作
+                            user_item = {
+                                'username': item.get('username'),
+                                'display_name': item.get('display_name'),
+                                'user_handle': item.get('user_handle'),
+                                'is_verified': item.get('is_verified', False),
+                                'follower_count': item.get('follower_count', 0),
+                                'element': item.get('element'),  # 推文元素，可能需要导航到用户页面
+                                'id': f"user_{item.get('username')}"
+                            }
+                            execution_item = user_item
                         else:
-                            await asyncio.sleep(action_config.min_interval)
-                    except asyncio.CancelledError:
-                        self.logger.info("Action execution cancelled")
-                        return
-                    except Exception as e:
-                        self.logger.debug(f"Error in delay: {e}")
+                            execution_item = item
+                        
+                        # 执行动作
+                        try:
+                            result = await self._execute_action_on_item(action_config, execution_item)
+                            
+                            if result == ActionResult.SUCCESS:
+                                action_quotas[action_config.action_type] -= 1
+                                self.action_counts[action_config.action_type.value] += 1
+                                self.total_actions += 1
+                                tweet_actions_executed += 1
+                                
+                                self.logger.info(f"✅ {action_config.action_type.value} successful on @{item.get('username')} - Remaining quota: {action_quotas[action_config.action_type]}")
+                            else:
+                                self.logger.debug(f"❌ {action_config.action_type.value} failed/skipped on @{item.get('username')}")
+                            
+                            # 记录行为
+                            serializable_details = {
+                                key: value for key, value in execution_item.items() 
+                                if key != 'element'
+                            }
+                            
+                            self.data_manager.record_action(
+                                action_type=action_config.action_type.value,
+                                target_type="tweet" if action_config.action_type in [ActionType.LIKE, ActionType.RETWEET, ActionType.COMMENT] else "user",
+                                target_id=execution_item.get('id', item_id),
+                                result=result,
+                                details=serializable_details
+                            )
+                            
+                        except Exception as e:
+                            self.logger.error(f"Error executing {action_config.action_type.value} on item {item_id}: {e}")
+                            continue
+                        
+                        # 动作间间隔
+                        if tweet_actions_executed > 0:  # 在动作之间添加间隔
+                            try:
+                                if self.config.randomize_intervals:
+                                    interval = random.uniform(
+                                        min(action.min_interval for action in enabled_actions),
+                                        max(action.max_interval for action in enabled_actions)
+                                    )
+                                    await asyncio.sleep(interval)
+                                else:
+                                    await asyncio.sleep(action_config.min_interval)
+                            except asyncio.CancelledError:
+                                self.logger.info("Action execution cancelled")
+                                return
+                            except Exception as e:
+                                self.logger.debug(f"Error in delay: {e}")
+                    
+                    # 推文处理完成的日志
+                    if tweet_actions_executed > 0:
+                        self.logger.info(f"Completed {tweet_actions_executed} actions on tweet from @{item.get('username')}")
                 
-                # 如果需要更多内容，滚动页面
-                if (executed_count < target_count and 
-                    self.total_actions < self.config.max_total_actions and
+                # 滚动获取更多内容
+                if (self.total_actions < self.config.max_total_actions and
                     datetime.now() < max_end_time and
-                    self.is_running):
+                    self.is_running and
+                    any(quota > 0 for quota in action_quotas.values())):
                     try:
                         await self._scroll_for_more_content()
                         await asyncio.sleep(2)  # 等待内容加载
@@ -248,15 +310,20 @@ class AutoXSession:
                         return
                     except Exception as e:
                         self.logger.debug(f"Error scrolling: {e}")
-                
-            except asyncio.CancelledError:
-                self.logger.info(f"Action execution for {action_type.value} was cancelled")
-                return
-            except Exception as e:
-                self.logger.error(f"Error in action execution loop: {e}")
-                break
+                        
+        except Exception as e:
+            self.logger.error(f"Error in configured actions execution: {e}")
         
-        self.logger.info(f"Completed {action_type.value}: {executed_count}/{target_count} actions")
+        # 总结
+        self.logger.info("Configured actions execution completed")
+        for action in enabled_actions:
+            executed = action.count - action_quotas[action.action_type]
+            self.logger.info(f"{action.action_type.value}: {executed}/{action.count} completed")
+    
+    async def _execute_single_action_type(self, action_config, max_end_time):
+        """执行单一类型的行为 - 保留此方法以防其他地方调用"""
+        # 这个方法现在主要用于向后兼容，实际执行逻辑在_execute_configured_actions中
+        pass
     
     async def _get_content_source(self):
         """获取内容源"""
@@ -683,29 +750,62 @@ def list_available_configs():
     return configs
 
 async def run_session(session_config: SessionConfig, search_keywords: Optional[List[str]] = None):
-    """运行会话"""
+    """运行单个会话"""
     session = AutoXSession(session_config, search_keywords)
-    try:
-        await session.start()
-        await session.run_task()
-    except KeyboardInterrupt:
-        print(f"\n[{session_config.session_id}] Session interrupted by user")
+    await session.start()
+    await session.run_task()
+
+async def run_multi_account_session(session_config: SessionConfig, search_keywords: Optional[List[str]] = None, cooldown_hours: int = 2):
+    """使用多账号运行会话"""
+    print("🚀 多账号执行模式")
+    
+    # 获取可用账号
+    available_accounts = account_manager.get_available_accounts()
+    
+    if not available_accounts:
+        print("❌ 没有可用的账号，请先添加账号")
+        print("使用命令: python manage_accounts.py")
+        return
+    
+    print(f"📋 找到 {len(available_accounts)} 个可用账号")
+    
+    # 为每个账号执行任务
+    for i, account in enumerate(available_accounts, 1):
+        print(f"\n=== 账号 {i}/{len(available_accounts)}: {account.account_id} (@{account.username}) ===")
+        
         try:
-            session.logger.info("Session interrupted by user (Ctrl+C)")
-        except:
-            pass
-    except Exception as e:
-        print(f"[{session_config.session_id}] Session error: {e}")
-        try:
-            session.logger.error(f"Session error: {e}")
-        except:
-            pass
-    finally:
-        # 确保会话正确关闭
-        try:
-            await session.close()
+            # 创建会话
+            session = AutoXSession(session_config, search_keywords, account)
+            
+            # 执行任务
+            await session.start()
+            await session.run_task()
+            
+            # 更新账号使用状态
+            account_manager.update_account_usage(account.account_id, set_cooldown=True)
+            
+            print(f"✅ 账号 {account.account_id} 执行完成")
+            
         except Exception as e:
-            print(f"[{session_config.session_id}] Error during session cleanup: {e}")
+            print(f"❌ 账号 {account.account_id} 执行失败: {e}")
+            # 即使失败也设置冷却，避免频繁重试
+            account_manager.update_account_usage(account.account_id, set_cooldown=True)
+        
+        # 账号间隔时间（避免风控）
+        if i < len(available_accounts):
+            wait_minutes = random.randint(5, 15)  # 随机等待5-15分钟
+            print(f"⏰ 等待 {wait_minutes} 分钟后执行下一个账号...")
+            await asyncio.sleep(wait_minutes * 60)
+    
+    print("\n🎉 所有账号执行完成!")
+    
+    # 显示统计信息
+    stats = account_manager.get_account_stats()
+    print(f"\n📊 账号状态统计:")
+    print(f"总账号数: {stats['total']}")
+    print(f"活跃账号: {stats['active']}")
+    print(f"可用账号: {stats['available']}")
+    print(f"冷却中账号: {stats['in_cooldown']}")
 
 def main():
     """主函数"""
@@ -716,11 +816,13 @@ def main():
     parser.add_argument("--create-config", action="store_true", help="创建示例配置")
     parser.add_argument("--list-configs", action="store_true", help="列出可用配置")
     parser.add_argument("--session-id", help="自定义会话ID")
+    parser.add_argument("--multi-account", action="store_true", help="使用多账号模式")
+    parser.add_argument("--account-id", help="指定单个账号ID")
     
     args = parser.parse_args()
     
     # 检查环境变量
-    if not any([settings.TWITTER_USERNAME, settings.TWITTER_PASSWORD]):
+    if not any([settings.TWITTER_USERNAME, settings.TWITTER_PASSWORD]) and not args.multi_account and not args.account_id:
         print("Warning: Twitter credentials not configured in .env file")
     
     if args.list_configs:
@@ -758,13 +860,46 @@ def main():
     # 更新会话ID
     config.session_id = session_id
     
-    # 运行会话
+    # 选择执行模式
     print(f"Starting AutoX session: {session_id}")
     print(f"Task: {config.name}")
     if args.search:
         print(f"Search keywords: {args.search}")
     
-    asyncio.run(run_session(config, args.search))
+    if args.multi_account:
+        # 多账号模式
+        print("🔄 多账号模式")
+        asyncio.run(run_multi_account_session(config, args.search))
+    elif args.account_id:
+        # 指定账号模式
+        account = account_manager.get_account(args.account_id)
+        if not account:
+            print(f"❌ 账号 {args.account_id} 不存在")
+            print("使用 'python manage_accounts.py --list' 查看可用账号")
+            return
+        if not account.is_available():
+            print(f"❌ 账号 {args.account_id} 不可用（可能处于冷却期或被禁用）")
+            return
+        
+        print(f"👤 指定账号模式: {account.account_id} (@{account.username})")
+        
+        async def run_with_account():
+            session = AutoXSession(config, args.search, account)
+            try:
+                await session.start()
+                await session.run_task()
+                # 更新账号使用状态
+                account_manager.update_account_usage(account.account_id, set_cooldown=True)
+                print(f"✅ 账号 {account.account_id} 执行完成")
+            except Exception as e:
+                print(f"❌ 账号 {account.account_id} 执行失败: {e}")
+                account_manager.update_account_usage(account.account_id, set_cooldown=True)
+        
+        asyncio.run(run_with_account())
+    else:
+        # 单账号模式（使用环境变量）
+        print("🔐 单账号模式（环境变量）")
+        asyncio.run(run_session(config, args.search))
 
 if __name__ == "__main__":
     main() 

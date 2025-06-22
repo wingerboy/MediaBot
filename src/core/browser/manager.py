@@ -168,6 +168,50 @@ class BrowserManager:
         except Exception as e:
             log.warning(f"保存cookies失败: {e}")
     
+    async def load_cookies(self, cookies_file: str):
+        """从指定文件加载cookies"""
+        try:
+            import json
+            from pathlib import Path
+            
+            cookies_path = Path(cookies_file)
+            if cookies_path.exists():
+                with open(cookies_path, 'r', encoding='utf-8') as f:
+                    cookies = json.load(f)
+                
+                if self.context and cookies:
+                    await self.context.add_cookies(cookies)
+                    log.info(f"已从 {cookies_file} 加载cookies")
+                    return True
+            else:
+                log.warning(f"Cookies文件不存在: {cookies_file}")
+                return False
+        except Exception as e:
+            log.warning(f"从文件加载cookies失败: {e}")
+            return False
+    
+    async def save_cookies(self, cookies_file: str):
+        """保存cookies到指定文件"""
+        try:
+            import json
+            from pathlib import Path
+            
+            if self.context:
+                cookies = await self.context.cookies()
+                
+                # 确保目录存在
+                cookies_path = Path(cookies_file)
+                cookies_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(cookies_path, 'w', encoding='utf-8') as f:
+                    json.dump(cookies, f, indent=2, ensure_ascii=False)
+                
+                log.info(f"已保存cookies到 {cookies_file}")
+                return True
+        except Exception as e:
+            log.warning(f"保存cookies到文件失败: {e}")
+            return False
+    
     def _get_random_user_agent(self) -> str:
         """获取随机User-Agent"""
         user_agents = [

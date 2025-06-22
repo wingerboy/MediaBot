@@ -513,8 +513,15 @@ class ActionExecutor:
                 self.logger.error(f"输入评论内容失败: {e}")
                 return ActionResult.FAILED
             
-            # 模拟打字延迟
-            await asyncio.sleep(random.uniform(1.0, 3.0))
+            # 模拟打字延迟和等待页面响应
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            
+            # 确保输入框仍然聚焦，有时需要重新点击
+            try:
+                await comment_box.click()
+                await asyncio.sleep(0.5)
+            except:
+                pass
             
             # 使用多种策略查找发送按钮
             send_button = None
@@ -527,16 +534,34 @@ class ActionExecutor:
                 'button:has-text("Reply")',
                 'button:has-text("发送")',
                 'div[role="button"]:has-text("Tweet")',
-                'div[role="button"]:has-text("Reply")'
+                'div[role="button"]:has-text("Reply")',
+                # 更通用的发送按钮选择器
+                'button[type="button"][data-testid*="tweet"]',
+                'div[role="button"][data-testid*="tweet"]',
+                # 通过颜色和位置特征找到发送按钮
+                'button[style*="background-color"]',
+                'div[role="button"][style*="background-color"]'
             ]
             
             for selector in send_selectors:
                 try:
                     button = self.page.locator(selector).first
                     if await button.count() > 0:
-                        send_button = button
-                        self.logger.debug(f"找到发送按钮，使用选择器: {selector}")
-                        break
+                        # 验证这确实是发送按钮
+                        try:
+                            button_text = await button.text_content(timeout=2000)
+                            if button_text and any(word in button_text.lower() for word in ['tweet', 'reply', '发送', '回复']):
+                                send_button = button
+                                self.logger.debug(f"找到发送按钮，使用选择器: {selector}, 文本: {button_text}")
+                                break
+                            elif not button_text:  # 有些按钮可能没有文本但有正确的data-testid
+                                if 'tweet' in selector.lower():
+                                    send_button = button
+                                    self.logger.debug(f"找到发送按钮，使用选择器: {selector} (无文本)")
+                                    break
+                        except Exception as e:
+                            self.logger.debug(f"验证发送按钮文本失败: {e}")
+                            continue
                 except Exception as e:
                     self.logger.debug(f"发送按钮选择器失败 {selector}: {e}")
                     continue
@@ -545,10 +570,50 @@ class ActionExecutor:
                 self.logger.warning("未找到发送按钮")
                 return ActionResult.FAILED
             
-            # 发送评论
+            # 发送评论 - 使用多种点击策略
             try:
-                await send_button.click(timeout=5000)
-                self.logger.debug("发送按钮点击成功")
+                # 策略1: 普通点击
+                try:
+                    await send_button.click(timeout=3000)
+                    self.logger.debug("发送按钮点击成功 (普通点击)")
+                except Exception as e:
+                    self.logger.debug(f"普通点击失败: {e}")
+                    
+                    # 策略2: 强制点击（忽略遮挡）
+                    try:
+                        await send_button.click(force=True, timeout=3000)
+                        self.logger.debug("发送按钮点击成功 (强制点击)")
+                    except Exception as e:
+                        self.logger.debug(f"强制点击失败: {e}")
+                        
+                        # 策略3: 使用JavaScript点击
+                        try:
+                            await send_button.evaluate("element => element.click()")
+                            self.logger.debug("发送按钮点击成功 (JavaScript点击)")
+                        except Exception as e:
+                            self.logger.debug(f"JavaScript点击失败: {e}")
+                            
+                            # 策略4: 模拟键盘按键
+                            try:
+                                await self.page.keyboard.press('Enter')
+                                self.logger.debug("使用Enter键发送评论")
+                            except Exception as e:
+                                self.logger.debug(f"键盘发送失败: {e}")
+                                
+                                # 策略5: 尝试点击按钮的中心位置
+                                try:
+                                    box = await send_button.bounding_box()
+                                    if box:
+                                        center_x = box['x'] + box['width'] / 2
+                                        center_y = box['y'] + box['height'] / 2
+                                        await self.page.mouse.click(center_x, center_y)
+                                        self.logger.debug("发送按钮点击成功 (坐标点击)")
+                                    else:
+                                        raise Exception("无法获取按钮位置")
+                                except Exception as e:
+                                    self.logger.error(f"所有点击策略都失败: {e}")
+                                    return ActionResult.FAILED
+                                    
             except Exception as e:
                 self.logger.error(f"点击发送按钮失败: {e}")
                 return ActionResult.FAILED
@@ -557,6 +622,10 @@ class ActionExecutor:
             await asyncio.sleep(random.uniform(2.0, 4.0))
             
             self.logger.info(f"评论发送成功: {comment_text}")
+            
+            # 将评论内容存储到tweet_info中，这样会被记录到action记录里
+            tweet_info['generated_comment'] = comment_text
+            
             return ActionResult.SUCCESS
             
         except Exception as e:

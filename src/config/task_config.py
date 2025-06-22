@@ -25,15 +25,25 @@ class ActionConfig:
     enabled: bool = True               # 是否启用
     
     # 评论相关参数
-    comment_templates: List[str] = field(default_factory=list)
+    comment_templates: List[str] = field(default_factory=list)  # 兼容旧字段名
+    template_comments: List[str] = field(default_factory=list)  # 新字段名
     use_ai_comment: bool = False       # 是否使用AI生成评论
-    ai_comment_fallback: bool = True   # AI失败时是否使用模板备用
+    ai_comment_fallback: str = "template"  # AI失败时的备用方案: "template" 或 "skip"
     
     # 关注相关参数
     follow_back_ratio: float = 0.3     # 关注回关率
     
     # 条件判断参数
     conditions: Dict[str, Any] = field(default_factory=dict)  # 执行条件
+    
+    def __post_init__(self):
+        """初始化后处理"""
+        # 如果template_comments为空但comment_templates有值，则复制过来
+        if not self.template_comments and self.comment_templates:
+            self.template_comments = self.comment_templates
+        # 如果comment_templates为空但template_comments有值，则复制过来（保持兼容性）
+        elif not self.comment_templates and self.template_comments:
+            self.comment_templates = self.template_comments
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -44,6 +54,7 @@ class ActionConfig:
             'max_interval': self.max_interval,
             'enabled': self.enabled,
             'comment_templates': self.comment_templates,
+            'template_comments': self.template_comments,
             'use_ai_comment': self.use_ai_comment,
             'ai_comment_fallback': self.ai_comment_fallback,
             'follow_back_ratio': self.follow_back_ratio,
@@ -53,29 +64,57 @@ class ActionConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ActionConfig':
         """从字典创建实例"""
-        data['action_type'] = ActionType(data['action_type'])
-        return cls(**data)
+        # 创建数据副本避免修改原始数据
+        data_copy = data.copy()
+        data_copy['action_type'] = ActionType(data_copy['action_type'])
+        
+        # 处理字段兼容性
+        if 'template_comments' not in data_copy and 'comment_templates' in data_copy:
+            data_copy['template_comments'] = data_copy['comment_templates']
+        
+        # 设置默认值
+        data_copy.setdefault('comment_templates', [])
+        data_copy.setdefault('template_comments', [])
+        data_copy.setdefault('use_ai_comment', False)
+        data_copy.setdefault('ai_comment_fallback', 'template')
+        data_copy.setdefault('follow_back_ratio', 0.3)
+        data_copy.setdefault('conditions', {})
+        data_copy.setdefault('enabled', True)
+        
+        return cls(**data_copy)
 
 @dataclass
 class TargetConfig:
     """目标领域配置"""
-    keywords: List[str] = field(default_factory=list)    # 搜索关键词
-    hashtags: List[str] = field(default_factory=list)    # 目标话题标签
-    users: List[str] = field(default_factory=list)       # 目标用户
+    source: str = "timeline"                                      # 内容源: "timeline", "search", "user"
+    keywords: List[str] = field(default_factory=list)            # 搜索关键词
+    hashtags: List[str] = field(default_factory=list)            # 目标话题标签
+    users: List[str] = field(default_factory=list)               # 目标用户
     languages: List[str] = field(default_factory=lambda: ['en', 'zh'])  # 语言限制
+    content_languages: List[str] = field(default_factory=lambda: ['en', 'zh'])  # 内容语言限制（兼容字段）
     
     # 内容过滤
     min_likes: int = 0                 # 最小点赞数
     max_age_hours: int = 24           # 内容最大年龄(小时)
     exclude_keywords: List[str] = field(default_factory=list)  # 排除关键词
     
+    def __post_init__(self):
+        """初始化后处理"""
+        # 统一语言设置
+        if not self.languages and self.content_languages:
+            self.languages = self.content_languages
+        elif not self.content_languages and self.languages:
+            self.content_languages = self.languages
+    
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
+            'source': self.source,
             'keywords': self.keywords,
             'hashtags': self.hashtags,
             'users': self.users,
             'languages': self.languages,
+            'content_languages': self.content_languages,
             'min_likes': self.min_likes,
             'max_age_hours': self.max_age_hours,
             'exclude_keywords': self.exclude_keywords
@@ -84,7 +123,19 @@ class TargetConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'TargetConfig':
         """从字典创建实例"""
-        return cls(**data)
+        # 创建数据副本并设置默认值
+        data_copy = data.copy()
+        data_copy.setdefault('source', 'timeline')
+        data_copy.setdefault('keywords', [])
+        data_copy.setdefault('hashtags', [])
+        data_copy.setdefault('users', [])
+        data_copy.setdefault('languages', ['en', 'zh'])
+        data_copy.setdefault('content_languages', data_copy['languages'])
+        data_copy.setdefault('min_likes', 0)
+        data_copy.setdefault('max_age_hours', 24)
+        data_copy.setdefault('exclude_keywords', [])
+        
+        return cls(**data_copy)
 
 @dataclass
 class SessionConfig:
@@ -276,6 +327,7 @@ class ActionConditions:
     media_types: List[str] = field(default_factory=list)  # 媒体类型 ['image', 'video', 'gif']
     min_content_length: Optional[int] = None    # 最小内容长度
     max_content_length: Optional[int] = None    # 最大内容长度
+    exclude_keywords: List[str] = field(default_factory=list)  # 排除关键词
     
     # 时间条件
     max_age_hours: Optional[int] = None         # 最大发布时间(小时)
@@ -442,6 +494,7 @@ class ActionConditions:
             'media_types': self.media_types,
             'min_content_length': self.min_content_length,
             'max_content_length': self.max_content_length,
+            'exclude_keywords': self.exclude_keywords,
             'max_age_hours': self.max_age_hours
         }
     
