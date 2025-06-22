@@ -48,10 +48,10 @@ class AIService:
         """
         try:
             # 构建提示词
-            prompt = self._build_comment_prompt(tweet_data)
+            system_prompt, user_prompt = self._build_comment_prompt(tweet_data)
             
             # 调用AI API
-            response = await self._call_deepseek_api(prompt)
+            response = await self._call_deepseek_api(system_prompt, user_prompt)
             
             if response:
                 # 后处理生成的评论
@@ -65,8 +65,8 @@ class AIService:
             self.logger.error(f"AI生成评论失败: {e}")
             return None
     
-    def _build_comment_prompt(self, tweet_data: Dict[str, Any]) -> str:
-        """构建评论生成的提示词"""
+    def _build_comment_prompt(self, tweet_data: Dict[str, Any]) -> tuple[str, str]:
+        """构建评论生成的提示词，返回(system_prompt, user_prompt)"""
         content = tweet_data.get('content', '')
         username = tweet_data.get('username', '')
         like_count = tweet_data.get('like_count', '0')
@@ -78,42 +78,56 @@ class AIService:
         
         if is_chinese:
             # 中文提示词
-            prompt = f"""请为以下推文生成一个自然、友善的回复评论：
+            system_prompt = """
+你是一个友好且精通社交媒体的助手，专门帮助用户创作真实的推特回复评论。当用户提供一条推文时，请生成一条**简短真诚的评论**，要求如下：
 
-推文作者: @{username} {'(已验证)' if is_verified else ''}
-推文内容: {content}
-互动数据: {like_count}赞 {retweet_count}转发
+1.  **人性化与个性化**：
+    → 用朋友闲聊般的自然口吻写作，避免机械感、陈词滥调或过度吹捧
+    → 根据可用上下文，让回复隐约体现该用户的个人风格
 
-要求:
-1. 回复要自然、友善，符合社交媒体的表达习惯
-2. 长度控制在50字以内
-3. 可以适当使用emoji增强表达效果
-4. 不要过度夸赞，保持真诚
-5. 避免争议性话题
-6. 直接输出评论内容，不要添加引号或解释
+2.  **匹配情绪与语境**：
+    → 准确捕捉原推文的情感氛围（如兴奋/支持/思考/吐槽/搞笑）
+    → 理解话题核心，确保评论内容相关
 
-评论:"""
+3.  **简洁有力**：
+    → 长度通常控制在70字内（中文计字符），但以自然流畅为优先
+    → 聚焦核心情绪传递，避免冗余信息
+
+4.  **精准使用表情**：
+    → 最多添加1-2个表情符号，且仅在能自然增强情感时使用
+    → 禁止堆砌表情或强行添加
+
+5.  **安全可信原则**：
+    → 保持中立或积极立场
+    → 严禁涉及政治、争议话题、广告营销及虚假内容
+    → 只用中文撰写
+
+6.  **纯净输出**：
+    → 仅返回评论正文，无需格式、标号或解释说明
+            """
+            
+            user_prompt = f"推文内容: {content}"
+            
         else:
             # 英文提示词
-            prompt = f"""Please generate a natural, friendly reply comment for the following tweet:
+            system_prompt = """
+You are a friendly, social-media-savvy assistant that helps users craft authentic replies to tweets. When the user provides a tweet, generate a **short, genuine comment** that:
 
-Tweet author: @{username} {'(verified)' if is_verified else ''}
+1.  **Feels Human & Personalized:** Write conversationally, like a real friend commenting. Avoid robotic phrasing, clichés, or exaggerated praise. Tailor the tone subtly to feel like it's coming from the specific user (based on context if available).
+2.  **Matches Tone & Context:** Reflect the emotional vibe of the original tweet (e.g., excited, supportive, thoughtful, sarcastic, funny). Understand the topic to make the reply relevant.
+3.  **Be Concise & Engaging:** Aim for brevity (typically under 100 characters for readability, but prioritize naturalness over strict limits). Focus on impact.
+4.  **Use Emojis Tastefully:** Include 1-2 relevant emojis *only* if they genuinely enhance warmth or emotion. Don't force them.
+5.  **Stay Safe & Sincere:** Be positive or neutral. Avoid anything controversial, political, promotional, or insincere. Write exclusively in English.
+6.  **Output Only:** Provide **only** the reply comment text itself, with no additional explanation or formatting.
+            """
+            
+            user_prompt = f"""Tweet author: @{username} {'(verified)' if is_verified else ''}
 Tweet content: {content}
-Engagement: {like_count} likes, {retweet_count} retweets
-
-Requirements:
-1. Reply should be natural and friendly, fitting social media expression habits
-2. Keep it under 50 characters
-3. Use emojis appropriately to enhance expression
-4. Don't over-praise, stay genuine
-5. Avoid controversial topics
-6. Output the comment directly without quotes or explanations
-
-Comment:"""
+Engagement: {like_count} likes, {retweet_count} retweets"""
         
-        return prompt
+        return system_prompt, user_prompt
     
-    async def _call_deepseek_api(self, prompt: str) -> Optional[str]:
+    async def _call_deepseek_api(self, system_prompt: str, user_prompt: str) -> Optional[str]:
         """调用DeepSeek API"""
         if not self.session:
             self.session = aiohttp.ClientSession()
@@ -127,8 +141,12 @@ Comment:"""
             "model": self.config.model,
             "messages": [
                 {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
                     "role": "user",
-                    "content": prompt
+                    "content": user_prompt
                 }
             ],
             "temperature": self.config.temperature,
