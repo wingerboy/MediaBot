@@ -1,0 +1,121 @@
+{
+  "session_id": "conditional_engagement",
+  "name": "条件化互动任务",
+  "description": "根据推文质量指标进行有条件的互动",
+  "actions": [
+    {
+      "action_type": "like",
+      "count": 15,
+      "min_interval": 3.0,
+      "max_interval": 8.0,
+      "enabled": true,
+      "conditions": {
+        "min_like_count": 10,
+        "max_like_count": 5000,
+        "min_view_count": 200,
+        "min_content_length": 20,
+        "max_content_length": 500,
+        "verified_only": null,
+        "exclude_verified": null,
+        "has_media": null
+      },
+      "comment_templates": [],
+      "follow_back_ratio": 0.3
+    },
+    {
+      "action_type": "follow",
+      "count": 3,
+      "min_interval": 15.0,
+      "max_interval": 30.0,
+      "enabled": true,
+      "conditions": {
+        "min_like_count": 100,
+        "min_view_count": 1000,
+        "min_content_length": 50,
+        "verified_only": false,
+        "exclude_verified": false,
+        "has_media": true,
+        "media_types": ["image", "video"]
+      },
+      "comment_templates": [],
+      "follow_back_ratio": 0.3
+    },
+    {
+      "action_type": "comment",
+      "count": 2,
+      "min_interval": 20.0,
+      "max_interval": 45.0,
+      "enabled": true,
+      "conditions": {
+        "min_like_count": 50,
+        "max_like_count": 2000,
+        "min_reply_count": 3,
+        "max_reply_count": 50,
+        "min_content_length": 40,
+        "max_content_length": 300,
+        "has_media": false,
+        "verified_only": false
+      },
+      "comment_templates": [
+        "很有见地的观点！👍",
+        "感谢分享这个信息 🙏",
+        "这个角度很有趣 🤔",
+        "学到了新东西 📚",
+        "同意你的看法 💯",
+        "Great insights! Thanks for sharing 🚀"
+      ],
+      "follow_back_ratio": 0.3
+    },
+    {
+      "action_type": "retweet",
+      "count": 1,
+      "min_interval": 30.0,
+      "max_interval": 60.0,
+      "enabled": true,
+      "conditions": {
+        "min_like_count": 200,
+        "min_retweet_count": 20,
+        "min_view_count": 2000,
+        "verified_only": true,
+        "min_content_length": 30,
+        "max_content_length": 280
+      },
+      "comment_templates": [],
+      "follow_back_ratio": 0.3
+    }
+  ],
+  "target": {
+    "keywords": [
+      "artificial intelligence",
+      "machine learning",
+      "technology",
+      "innovation",
+      "startup",
+      "programming"
+    ],
+    "hashtags": [
+      "#AI",
+      "#MachineLearning",
+      "#Tech",
+      "#Innovation",
+      "#Startup",
+      "#Programming"
+    ],
+    "users": [],
+    "languages": ["en", "zh"],
+    "min_likes": 5,
+    "max_age_hours": 12,
+    "exclude_keywords": [
+      "spam",
+      "scam",
+      "crypto pump",
+      "get rich quick",
+      "广告",
+      "垃圾"
+    ]
+  },
+  "max_duration_minutes": 40,
+  "max_total_actions": 30,
+  "randomize_intervals": true,
+  "respect_rate_limits": true
+} 

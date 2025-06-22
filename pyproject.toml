@@ -1,0 +1,50 @@
+[tool.poetry]
+name = "mediabot"
+version = "0.1.0"
+description = "基于 Playwright 的 Twitter 自动化机器人"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+playwright = "^1.40.0"
+python-dotenv = "^1.0.0"
+loguru = "^0.7.2"
+aiofiles = "^23.2.1"
+typing-extensions = "^4.8.0"
+playwright-stealth = ">=2.0.0"
+aiohttp = "^3.12.13"
+
+[tool.poetry.group.dev.dependencies]
+black = "^23.0.0"
+isort = "^5.12.0"
+flake8 = "^6.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["src"] 

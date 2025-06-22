@@ -1,0 +1,61 @@
+{
+  "session_id": "light_browsing",
+  "name": "轻度浏览任务",
+  "description": "轻量级的内容浏览和少量互动",
+  "actions": [
+    {
+      "action_type": "like",
+      "count": 1,
+      "min_interval": 5.0,
+      "max_interval": 12.0,
+      "enabled": true,
+      "comment_templates": [],
+      "follow_back_ratio": 0.3
+    },
+    {
+      "action_type": "follow",
+      "count": 0,
+      "min_interval": 30.0,
+      "max_interval": 60.0,
+      "enabled": true,
+      "comment_templates": [],
+      "follow_back_ratio": 0.3
+    },
+    {
+      "action_type": "browse",
+      "count": 50,
+      "min_interval": 10.0,
+      "max_interval": 30.0,
+      "enabled": true,
+      "comment_templates": [],
+      "follow_back_ratio": 0.3
+    }
+  ],
+  "target": {
+    "keywords": [
+      "technology",
+      "programming",
+      "startup",
+      "innovation"
+    ],
+    "hashtags": [
+      "#Tech",
+      "#Programming",
+      "#Startup",
+      "#Innovation"
+    ],
+    "users": [],
+    "languages": ["en"],
+    "min_likes": 0,
+    "max_age_hours": 12,
+    "exclude_keywords": [
+      "politics",
+      "controversy",
+      "spam"
+    ]
+  },
+  "max_duration_minutes": 30,
+  "max_total_actions": 25,
+  "randomize_intervals": true,
+  "respect_rate_limits": true
+} 
