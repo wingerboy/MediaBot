@@ -14,11 +14,12 @@ from src.services.ai_service import AIConfig, ai_service_manager
 class ActionExecutor:
     """行为执行器"""
     
-    def __init__(self, page: Page, session_id: str, ai_config: Optional[AIConfig] = None):
+    def __init__(self, page: Page, session_id: str, ai_config: Optional[AIConfig] = None, browser_manager=None):
         self.page = page
         self.session_id = session_id
         self.logger = get_session_logger(session_id)
         self.ai_config = ai_config
+        self.browser_manager = browser_manager
         
         # 初始化AI服务
         if self.ai_config:
@@ -181,6 +182,10 @@ class ActionExecutor:
                 self.logger.error("页面不可用，跳过点赞操作")
                 return ActionResult.ERROR
             
+            # 如果有browser_manager，使用安全行为模拟
+            if self.browser_manager:
+                await self.browser_manager.simulate_human_behavior()
+            
             # 使用多种策略查找点赞按钮
             like_button = None
             like_selectors = [
@@ -198,53 +203,60 @@ class ActionExecutor:
                     button = tweet_element.locator(selector).first
                     if await button.count() > 0:
                         like_button = button
-                        self.logger.debug(f"找到点赞按钮，使用选择器: {selector}")
                         break
                 except Exception as e:
-                    self.logger.debug(f"点赞选择器失败 {selector}: {e}")
+                    self.logger.debug(f"点赞按钮选择器失败 {selector}: {e}")
                     continue
             
             if not like_button:
                 self.logger.warning("未找到点赞按钮")
-                return ActionResult.FAILED
+                return ActionResult.ERROR
             
             # 检查是否已经点赞
             try:
-                aria_label = await like_button.get_attribute('aria-label', timeout=3000)
-                if aria_label and ('liked' in aria_label.lower() or '已赞' in aria_label):
-                    self.logger.info(f"推文已点赞: {tweet_info.get('id', 'unknown')}")
+                # 检查按钮状态
+                aria_label = await like_button.get_attribute('aria-label')
+                if aria_label and ('liked' in aria_label.lower() or 'unlike' in aria_label.lower()):
+                    self.logger.info("推文已点赞，跳过")
                     return ActionResult.SKIPPED
+                
+                # 检查按钮的视觉状态
+                button_class = await like_button.get_attribute('class')
+                if button_class and 'liked' in button_class.lower():
+                    self.logger.info("推文已点赞（通过class检测），跳过")
+                    return ActionResult.SKIPPED
+                
             except Exception as e:
                 self.logger.debug(f"检查点赞状态失败: {e}")
-                # 继续执行点赞，可能是未点赞状态
             
-            # 执行点赞
+            # 使用安全点击或常规点击
             try:
+                if self.browser_manager and hasattr(self.browser_manager, 'safe_click'):
+                    # 获取点赞按钮的选择器
+                    for selector in like_selectors:
+                        try:
+                            if await tweet_element.locator(selector).count() > 0:
+                                success = await self.browser_manager.safe_click(selector)
+                                if success:
+                                    self.logger.info(f"✅ 点赞成功 (@{tweet_info.get('username', 'Unknown')})")
+                                    return ActionResult.SUCCESS
+                        except Exception as e:
+                            self.logger.debug(f"安全点击失败 {selector}: {e}")
+                            continue
+                
+                # 降级到普通点击
                 await like_button.click(timeout=5000)
-                self.logger.debug("点赞按钮点击成功")
-            except Exception as e:
-                self.logger.error(f"点击点赞按钮失败: {e}")
-                return ActionResult.FAILED
-            
-            # 等待反馈确认
-            await asyncio.sleep(random.uniform(0.5, 1.5))
-            
-            # 验证点赞是否成功（可选，失败不影响结果）
-            try:
-                updated_aria_label = await like_button.get_attribute('aria-label', timeout=2000)
-                if updated_aria_label and ('liked' in updated_aria_label.lower() or '已赞' in updated_aria_label):
-                    self.logger.info(f"点赞成功: {tweet_info.get('content', '')[:50]}...")
-                    return ActionResult.SUCCESS
-                else:
-                    # 即使验证失败，也认为可能成功了
-                    self.logger.info(f"点赞操作完成（验证可能失败）: {tweet_info.get('content', '')[:50]}...")
-                    return ActionResult.SUCCESS
-            except Exception as e:
-                self.logger.debug(f"验证点赞状态失败: {e}")
-                # 假设成功
-                self.logger.info(f"点赞操作完成: {tweet_info.get('content', '')[:50]}...")
+                self.logger.info(f"✅ 点赞成功 (@{tweet_info.get('username', 'Unknown')})")
+                
+                # 随机延迟
+                await self.random_delay(0.5, 2.0)
+                
                 return ActionResult.SUCCESS
                 
+            except Exception as e:
+                self.logger.error(f"点击点赞按钮失败: {e}")
+                return ActionResult.ERROR
+            
         except Exception as e:
             self.logger.error(f"点赞操作失败: {e}")
             return ActionResult.ERROR
@@ -260,74 +272,108 @@ class ActionExecutor:
             username = user_info.get('username', 'unknown')
             self.logger.debug(f"准备关注用户: {username}")
             
-            # 策略1: 先在当前页面查找关注按钮
-            follow_button = await self._find_follow_button_on_current_page(user_element, username)
-            
-            # 策略2: 如果当前页面没有找到，导航到用户资料页面
-            if not follow_button:
-                self.logger.debug(f"当前页面未找到关注按钮，导航到用户资料页面: {username}")
+            # 直接导航到用户资料页面进行关注（推文页面通常没有关注按钮）
+            try:
+                profile_url = f"https://x.com/{username}"
+                self.logger.debug(f"导航到用户资料页面: {profile_url}")
                 
-                # 导航到用户资料页面
+                # 保存当前页面URL以便稍后返回
+                original_url = self.page.url
+                
+                await self.page.goto(profile_url, timeout=15000)
+                await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+                await asyncio.sleep(random.uniform(2.0, 3.0))
+                
+                # 在资料页面查找关注按钮
+                follow_button = await self._find_follow_button_on_profile_page()
+                
+                if not follow_button:
+                    self.logger.warning(f"未找到用户 {username} 的关注按钮")
+                    # 返回原页面
+                    try:
+                        await self.page.goto(original_url, timeout=10000)
+                        await asyncio.sleep(1)
+                    except:
+                        pass
+                    return ActionResult.FAILED
+                
+                # 检查按钮状态
                 try:
-                    profile_url = f"https://x.com/{username}"
-                    await self.page.goto(profile_url, timeout=10000)
-                    await self.page.wait_for_load_state("networkidle", timeout=5000)
-                    await asyncio.sleep(random.uniform(1.0, 2.0))
+                    button_text = await follow_button.text_content(timeout=3000)
+                    if button_text:
+                        button_text_lower = button_text.lower()
+                        # 如果已经关注，跳过
+                        if any(word in button_text_lower for word in ['following', 'unfollow', '已关注', '取消关注']):
+                            self.logger.info(f"已关注用户: {username}")
+                            # 返回原页面
+                            try:
+                                await self.page.goto(original_url, timeout=10000)
+                                await asyncio.sleep(1)
+                            except:
+                                pass
+                            return ActionResult.SKIPPED
+                        
+                        self.logger.debug(f"关注按钮文本: {button_text}")
+                except Exception as e:
+                    self.logger.debug(f"检查关注状态失败: {e}")
+                
+                # 执行关注
+                try:
+                    await follow_button.click(timeout=5000)
+                    self.logger.debug(f"关注按钮点击成功: {username}")
+                except Exception as e:
+                    self.logger.error(f"点击关注按钮失败: {e}")
+                    # 返回原页面
+                    try:
+                        await self.page.goto(original_url, timeout=10000)
+                        await asyncio.sleep(1)
+                    except:
+                        pass
+                    return ActionResult.FAILED
+                
+                # 等待反馈确认
+                await asyncio.sleep(random.uniform(2.0, 4.0))
+                
+                # 验证关注是否成功
+                try:
+                    # 重新查找按钮以获取最新状态
+                    updated_button = await self._find_follow_button_on_profile_page()
+                    if updated_button:
+                        updated_text = await updated_button.text_content(timeout=2000)
+                        if updated_text and any(word in updated_text.lower() for word in ['following', 'unfollow', '已关注']):
+                            self.logger.info(f"✅ 关注成功: {username}")
+                            # 返回原页面
+                            try:
+                                await self.page.goto(original_url, timeout=10000)
+                                await asyncio.sleep(1)
+                            except:
+                                pass
+                            return ActionResult.SUCCESS
                     
-                    # 在资料页面查找关注按钮
-                    follow_button = await self._find_follow_button_on_profile_page()
+                    # 即使验证失败，也认为可能成功了
+                    self.logger.info(f"关注操作完成: {username}")
+                    # 返回原页面
+                    try:
+                        await self.page.goto(original_url, timeout=10000)
+                        await asyncio.sleep(1)
+                    except:
+                        pass
+                    return ActionResult.SUCCESS
                     
                 except Exception as e:
-                    self.logger.error(f"导航到用户资料页面失败: {e}")
-                    return ActionResult.FAILED
-            
-            if not follow_button:
-                self.logger.warning(f"未找到用户 {username} 的关注按钮")
-                return ActionResult.FAILED
-            
-            # 检查按钮状态
-            try:
-                button_text = await follow_button.text_content(timeout=3000)
-                if button_text:
-                    button_text_lower = button_text.lower()
-                    # 如果已经关注，跳过
-                    if any(word in button_text_lower for word in ['following', 'unfollow', '已关注', '取消关注']):
-                        self.logger.info(f"已关注用户: {username}")
-                        return ActionResult.SKIPPED
-                    
-                    self.logger.debug(f"关注按钮文本: {button_text}")
-            except Exception as e:
-                self.logger.debug(f"检查关注状态失败: {e}")
-            
-            # 执行关注
-            try:
-                await follow_button.click(timeout=5000)
-                self.logger.debug(f"关注按钮点击成功: {username}")
-            except Exception as e:
-                self.logger.error(f"点击关注按钮失败: {e}")
-                return ActionResult.FAILED
-            
-            # 等待反馈确认
-            await asyncio.sleep(random.uniform(1.5, 3.0))
-            
-            # 验证关注是否成功
-            try:
-                # 重新查找按钮以获取最新状态
-                updated_button = await self._find_follow_button_on_profile_page()
-                if updated_button:
-                    updated_text = await updated_button.text_content(timeout=2000)
-                    if updated_text and any(word in updated_text.lower() for word in ['following', 'unfollow', '已关注']):
-                        self.logger.info(f"关注成功: {username}")
-                        return ActionResult.SUCCESS
-                
-                # 即使验证失败，也认为可能成功了
-                self.logger.info(f"关注操作完成: {username}")
-                return ActionResult.SUCCESS
+                    self.logger.debug(f"验证关注状态失败: {e}")
+                    self.logger.info(f"关注操作完成: {username}")
+                    # 返回原页面
+                    try:
+                        await self.page.goto(original_url, timeout=10000)
+                        await asyncio.sleep(1)
+                    except:
+                        pass
+                    return ActionResult.SUCCESS
                 
             except Exception as e:
-                self.logger.debug(f"验证关注状态失败: {e}")
-                self.logger.info(f"关注操作完成: {username}")
-                return ActionResult.SUCCESS
+                self.logger.error(f"导航到用户资料页面失败: {e}")
+                return ActionResult.FAILED
             
         except Exception as e:
             self.logger.error(f"关注操作失败: {e}")
@@ -507,8 +553,29 @@ class ActionExecutor:
             
             # 输入评论
             try:
-                await comment_box.fill(comment_text, timeout=5000)
-                self.logger.debug(f"评论内容输入成功: {comment_text}")
+                if self.browser_manager and hasattr(self.browser_manager, 'safe_type'):
+                    # 使用安全输入方法
+                    success = False
+                    for selector in comment_selectors:
+                        try:
+                            if await self.page.locator(selector).count() > 0:
+                                success = await self.browser_manager.safe_type(selector, comment_text)
+                                if success:
+                                    self.logger.debug(f"安全输入评论成功: {comment_text}")
+                                    break
+                        except Exception as e:
+                            self.logger.debug(f"安全输入失败 {selector}: {e}")
+                            continue
+                    
+                    if not success:
+                        # 降级到普通输入
+                        await comment_box.fill(comment_text, timeout=5000)
+                        self.logger.debug(f"评论内容输入成功(降级): {comment_text}")
+                else:
+                    # 使用普通输入
+                    await comment_box.fill(comment_text, timeout=5000)
+                    self.logger.debug(f"评论内容输入成功: {comment_text}")
+                    
             except Exception as e:
                 self.logger.error(f"输入评论内容失败: {e}")
                 return ActionResult.FAILED

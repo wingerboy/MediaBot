@@ -16,6 +16,7 @@ class TwitterClient:
     def __init__(self, page: Page):
         self.page = page
         self.is_logged_in = False
+        self.cookies_loaded = False  # 标记是否成功加载了cookies
     
     async def login(self, username: str = None, password: str = None, email: str = None) -> bool:
         """登录Twitter"""
@@ -77,25 +78,224 @@ class TwitterClient:
     async def check_login_status(self) -> bool:
         """检查登录状态"""
         try:
-            # 检查是否在主页
-            if "twitter.com/home" in self.page.url:
+            current_url = self.page.url
+            log.info(f"当前页面URL: {current_url}")
+            
+            # 如果成功加载了cookies，使用简化的检查流程
+            if self.cookies_loaded:
+                log.info("🍪 已加载cookies，使用简化登录检查")
+                
+                # 如果当前页面是空白，直接导航到主页
+                if not current_url or current_url == "about:blank" or "about:blank" in current_url:
+                    try:
+                        log.info("导航到主页验证登录状态")
+                        await self.page.goto("https://x.com/home", timeout=12000)
+                        await self.page.wait_for_load_state("domcontentloaded", timeout=8000)
+                        await asyncio.sleep(2)
+                        
+                        final_url = self.page.url
+                        log.info(f"导航后URL: {final_url}")
+                        
+                        # 如果没有被重定向到登录页面，认为已登录
+                        if not any(redirect in final_url for redirect in ["login", "signin", "flow/login"]):
+                            log.info("✅ 已加载cookies且未被重定向到登录页面，认为已登录")
+                            self.is_logged_in = True
+                            return True
+                    except Exception as e:
+                        log.warning(f"使用cookies导航失败: {e}")
+                        # 降级到标准检查流程
+                        pass
+                
+                # 如果已经在登录状态的页面
+                logged_in_indicators = [
+                    "x.com/home", "twitter.com/home", "x.com/notifications", 
+                    "twitter.com/notifications", "x.com/messages", "twitter.com/messages",
+                    "x.com/explore", "twitter.com/explore"
+                ]
+                
+                for indicator in logged_in_indicators:
+                    if indicator in current_url:
+                        log.info(f"✅ 已在登录页面且有cookies: {current_url}")
+                        self.is_logged_in = True
+                        return True
+            
+            # 标准检查流程（原有逻辑）
+            # 快速检查：如果当前URL已经显示登录状态，直接验证
+            logged_in_indicators = [
+                "x.com/home",
+                "twitter.com/home", 
+                "x.com/notifications",
+                "twitter.com/notifications",
+                "x.com/messages",
+                "twitter.com/messages",
+                "x.com/explore",
+                "twitter.com/explore"
+            ]
+            
+            for indicator in logged_in_indicators:
+                if indicator in current_url:
+                    log.info(f"URL显示已在登录页面: {current_url}")
+                    # 快速验证页面内容
+                    if await self._verify_login_elements():
+                        log.info("✅ 登录状态验证成功")
+                        self.is_logged_in = True
+                        return True
+                    else:
+                        log.warning("URL显示已登录但页面内容验证失败")
+                        break
+            
+            # 如果当前页面是空白或about:blank，直接尝试访问主页
+            if not current_url or current_url == "about:blank" or "about:blank" in current_url:
+                log.info("当前页面为空白，尝试访问主页")
+                return await self._navigate_and_check_login()
+            
+            # 检查当前页面是否有登录状态的元素（不跳转页面）
+            if await self._verify_login_elements():
+                log.info("✅ 当前页面检测到登录状态")
                 self.is_logged_in = True
                 return True
             
-            # 尝试访问主页
-            await self.page.goto("https://twitter.com/home")
-            await self.page.wait_for_load_state("networkidle")
-            
-            # 如果被重定向到登录页面，说明没有登录
-            if "login" in self.page.url:
+            # 检查是否在登录页面
+            if any(login_indicator in current_url for login_indicator in ["login", "signin", "flow/login"]):
+                log.info("当前在登录页面，未登录")
                 self.is_logged_in = False
                 return False
             
-            self.is_logged_in = True
-            return True
+            # 如果当前页面状态不明确，尝试访问主页检查
+            log.info("当前页面状态不明确，尝试访问主页检查登录状态")
+            return await self._navigate_and_check_login()
             
         except Exception as e:
             log.error(f"检查登录状态失败: {e}")
+            self.is_logged_in = False
+            return False
+    
+    async def _verify_login_elements(self) -> bool:
+        """验证页面是否有登录状态的元素"""
+        try:
+            # 检查是否有导航栏或用户相关元素
+            navigation_selectors = [
+                '[data-testid="SideNav_AccountSwitcher_Button"]',
+                '[data-testid="AppTabBar_Home_Link"]',
+                '[data-testid="UserAvatar-Container-"]',
+                'nav[role="navigation"]',
+                '[data-testid="primaryColumn"]',  # 主要内容列
+                '[data-testid="sidebarColumn"]'   # 侧边栏
+            ]
+            
+            for selector in navigation_selectors:
+                try:
+                    element = self.page.locator(selector)
+                    if await element.count() > 0:
+                        log.debug(f"检测到登录元素: {selector}")
+                        return True
+                except Exception as e:
+                    log.debug(f"检查登录元素失败 {selector}: {e}")
+                    continue
+            
+            # 检查是否有登录表单（表示未登录）
+            login_form_selectors = [
+                'input[autocomplete="username"]',
+                'input[name="text"]',
+                'div[data-testid="LoginForm"]',
+                'div[data-testid="login-form"]'
+            ]
+            
+            for selector in login_form_selectors:
+                try:
+                    element = self.page.locator(selector)
+                    if await element.count() > 0:
+                        log.debug(f"检测到登录表单: {selector}")
+                        return False
+                except Exception as e:
+                    log.debug(f"检查登录表单失败 {selector}: {e}")
+                    continue
+            
+            return False
+            
+        except Exception as e:
+            log.debug(f"验证登录元素失败: {e}")
+            return False
+    
+    async def _navigate_and_check_login(self) -> bool:
+        """导航到主页并检查登录状态"""
+        try:
+            # 尝试访问主页检查登录状态 - 优先使用x.com
+            home_urls = ["https://x.com/home", "https://twitter.com/home"]
+            
+            for home_url in home_urls:
+                try:
+                    log.info(f"尝试访问主页检查登录状态: {home_url}")
+                    
+                    # 使用更短的超时和重试机制
+                    max_retries = 2
+                    for retry in range(max_retries):
+                        try:
+                            await self.page.goto(home_url, timeout=10000)  # 减少超时时间
+                            await self.page.wait_for_load_state("domcontentloaded", timeout=8000)  # 等待DOM加载即可
+                            
+                            # 较短的等待时间
+                            await asyncio.sleep(2)
+                            
+                            final_url = self.page.url
+                            log.info(f"访问后的URL: {final_url}")
+                            
+                            # 检查是否被重定向到登录页面
+                            if any(redirect in final_url for redirect in ["login", "signin", "flow/login"]):
+                                log.info("被重定向到登录页面，需要登录")
+                                self.is_logged_in = False
+                                return False
+                            
+                            # 检查是否成功到达主页或其他已登录页面
+                            if any(success in final_url for success in ["home", "notifications", "messages", "explore"]):
+                                # 进一步验证页面内容
+                                if await self._verify_login_elements():
+                                    log.info(f"✅ 登录状态检查成功，当前页面: {final_url}")
+                                    self.is_logged_in = True
+                                    return True
+                                else:
+                                    log.warning(f"到达目标页面但未检测到登录元素: {final_url}")
+                                    if retry < max_retries - 1:
+                                        log.info(f"重试 {retry + 1}/{max_retries}")
+                                        await asyncio.sleep(2)
+                                        continue
+                                    else:
+                                        break
+                            
+                            # 如果成功访问且没有被重定向，再次验证登录状态
+                            if await self._verify_login_elements():
+                                log.info(f"✅ 成功访问主页并确认已登录: {final_url}")
+                                self.is_logged_in = True
+                                return True
+                            else:
+                                log.warning(f"访问成功但未检测到登录状态: {final_url}")
+                                if retry < max_retries - 1:
+                                    log.info(f"重试 {retry + 1}/{max_retries}")
+                                    await asyncio.sleep(2)
+                                    continue
+                                else:
+                                    break
+                                    
+                        except Exception as retry_error:
+                            log.warning(f"访问 {home_url} 第 {retry + 1} 次尝试失败: {retry_error}")
+                            if retry < max_retries - 1:
+                                await asyncio.sleep(3)  # 重试前等待更长时间
+                                continue
+                            else:
+                                raise retry_error
+                    
+                except Exception as e:
+                    log.warning(f"访问 {home_url} 完全失败: {e}")
+                    continue
+            
+            # 如果所有尝试都失败，认为未登录
+            log.warning("⚠️ 无法确定登录状态，认为未登录")
+            self.is_logged_in = False
+            return False
+            
+        except Exception as e:
+            log.error(f"导航检查登录状态失败: {e}")
+            self.is_logged_in = False
             return False
     
     async def get_timeline_tweets(self, count: int = 10) -> List[Dict[str, Any]]:

@@ -77,6 +77,10 @@ class LocalStorage:
         ext = ".json" if format == "json" else ".pkl"
         filepath = self.storage_dir / f"{filename}{ext}"
         return filepath.exists()
+    
+    def get_data_dir(self) -> Path:
+        """获取数据目录路径"""
+        return self.storage_dir
 
 # 创建全局存储实例
 storage = LocalStorage() 

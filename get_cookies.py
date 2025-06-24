@@ -32,7 +32,7 @@ async def login_and_save_cookies(account_id: str):
         # 启动浏览器
         print("🚀 启动浏览器...")
         browser_manager = BrowserManager()
-        await browser_manager.start()
+        await browser_manager.start(headless=False)
         
         # 创建Twitter客户端
         twitter_client = TwitterClient(browser_manager.page)

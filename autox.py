@@ -64,15 +64,25 @@ class AutoXSession:
             
             # 启动浏览器
             self.browser_manager = BrowserManager()
-            await self.browser_manager.start()
+            await self.browser_manager.start(headless=False)  # 设置为非headless模式
+            
+            # 初始化客户端
+            self.twitter_client = TwitterClient(self.browser_manager.page)
             
             # 加载账号cookies（如果配置了账号）
             if self.account_config and Path(self.account_config.cookies_file).exists():
                 try:
                     await self.browser_manager.load_cookies(self.account_config.cookies_file)
                     self.logger.info(f"Loaded cookies from: {self.account_config.cookies_file}")
+                    
+                    # 设置可能已登录的标志
+                    self.twitter_client.cookies_loaded = True
+                    
                 except Exception as e:
                     self.logger.warning(f"Failed to load cookies: {e}")
+                    self.twitter_client.cookies_loaded = False
+            else:
+                self.twitter_client.cookies_loaded = False
             
             # 创建AI配置（如果有API密钥）
             ai_config = None
@@ -89,10 +99,8 @@ class AutoXSession:
             else:
                 self.logger.info("未配置DeepSeek API密钥，将使用模板评论")
             
-            # 初始化客户端
-            self.twitter_client = TwitterClient(self.browser_manager.page)
             self.timeline_browser = TimelineBrowser(self.browser_manager)
-            self.action_executor = ActionExecutor(self.browser_manager.page, self.session_id, ai_config)
+            self.action_executor = ActionExecutor(self.browser_manager.page, self.session_id, ai_config, self.browser_manager)
             self.content_filter = ContentFilter(self.session_id)
             
             self.is_running = True
@@ -170,24 +178,47 @@ class AutoXSession:
             # 获取内容源
             content_source = await self._get_content_source()
             
+            loop_count = 0
+            consecutive_empty_iterations = 0
+            max_consecutive_empty = 3  # 允许的最大连续空迭代次数
+            
             while (self.total_actions < self.config.max_total_actions and
                    datetime.now() < max_end_time and
                    self.is_running and
                    any(quota > 0 for quota in action_quotas.values())):
                 
+                loop_count += 1
+                remaining_time = (max_end_time - datetime.now()).total_seconds() / 60
+                self.logger.debug(f"=== 循环 {loop_count} 开始 ===")
+                self.logger.debug(f"剩余时间: {remaining_time:.1f}分钟, 总动作数: {self.total_actions}/{self.config.max_total_actions}")
+                self.logger.debug(f"剩余配额: Like={action_quotas[ActionType.LIKE]}, Comment={action_quotas[ActionType.COMMENT]}, Follow={action_quotas[ActionType.FOLLOW]}")
+                
                 # 获取推文内容
                 content_items = await self._extract_tweets_from_page()
                 
                 if not content_items:
-                    self.logger.warning("No content items found")
+                    consecutive_empty_iterations += 1
+                    self.logger.warning(f"No content items found (连续第{consecutive_empty_iterations}次)")
+                    
+                    if consecutive_empty_iterations >= max_consecutive_empty:
+                        self.logger.warning(f"连续{max_consecutive_empty}次无法获取内容，可能已到达时间线底部，结束任务")
+                        break
+                    
                     # 尝试滚动获取更多内容
                     try:
+                        self.logger.info("尝试滚动获取更多内容...")
                         await self._scroll_for_more_content()
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(3)  # 增加等待时间
                         continue
                     except Exception as e:
                         self.logger.debug(f"Error scrolling: {e}")
                         break
+                else:
+                    consecutive_empty_iterations = 0  # 重置计数器
+                    self.logger.debug(f"获取到 {len(content_items)} 条推文")
+                
+                items_processed_in_loop = 0
+                actions_executed_in_loop = 0
                 
                 # 处理每个推文
                 for item in content_items:
@@ -196,6 +227,7 @@ class AutoXSession:
                         datetime.now() >= max_end_time or
                         not self.is_running or
                         all(quota <= 0 for quota in action_quotas.values())):
+                        self.logger.info(f"达到终止条件 - 总动作:{self.total_actions}>={self.config.max_total_actions}, 时间超时:{datetime.now() >= max_end_time}, 运行中:{self.is_running}, 配额耗尽:{all(quota <= 0 for quota in action_quotas.values())}")
                         break
                     
                     item_id = item.get('id') or item.get('url', str(hash(str(item))))
@@ -212,6 +244,7 @@ class AutoXSession:
                         self.logger.debug(f"Error in content filter: {e}")
                         continue
                     
+                    items_processed_in_loop += 1
                     self.logger.info(f"Processing tweet from @{item.get('username', 'Unknown')}: {item.get('content', '')[:50]}...")
                     
                     # 对这条推文执行所有启用的动作
@@ -230,7 +263,7 @@ class AutoXSession:
                         
                         # 对于follow动作，需要特殊处理（从推文提取用户信息）
                         if action_config.action_type == ActionType.FOLLOW:
-                            # 构造用户信息用于follow动作
+                            # 构造用户信息用于follow动作，保留推文的互动数据用于条件检查
                             user_item = {
                                 'username': item.get('username'),
                                 'display_name': item.get('display_name'),
@@ -238,7 +271,17 @@ class AutoXSession:
                                 'is_verified': item.get('is_verified', False),
                                 'follower_count': item.get('follower_count', 0),
                                 'element': item.get('element'),  # 推文元素，可能需要导航到用户页面
-                                'id': f"user_{item.get('username')}"
+                                'id': f"user_{item.get('username')}",
+                                
+                                # 保留推文的互动数据用于条件检查
+                                'like_count': item.get('like_count', '0'),
+                                'retweet_count': item.get('retweet_count', '0'),
+                                'reply_count': item.get('reply_count', '0'),
+                                'view_count': item.get('view_count', '0'),
+                                'content': item.get('content', ''),
+                                'has_images': item.get('has_images', False),
+                                'has_video': item.get('has_video', False),
+                                'has_gif': item.get('has_gif', False)
                             }
                             execution_item = user_item
                         else:
@@ -253,6 +296,7 @@ class AutoXSession:
                                 self.action_counts[action_config.action_type.value] += 1
                                 self.total_actions += 1
                                 tweet_actions_executed += 1
+                                actions_executed_in_loop += 1
                                 
                                 self.logger.info(f"✅ {action_config.action_type.value} successful on @{item.get('username')} - Remaining quota: {action_quotas[action_config.action_type]}")
                             else:
@@ -297,12 +341,17 @@ class AutoXSession:
                     if tweet_actions_executed > 0:
                         self.logger.info(f"Completed {tweet_actions_executed} actions on tweet from @{item.get('username')}")
                 
+                # 循环总结
+                self.logger.debug(f"=== 循环 {loop_count} 完成 ===")
+                self.logger.debug(f"本轮处理推文: {items_processed_in_loop}, 执行动作: {actions_executed_in_loop}")
+                
                 # 滚动获取更多内容
                 if (self.total_actions < self.config.max_total_actions and
                     datetime.now() < max_end_time and
                     self.is_running and
                     any(quota > 0 for quota in action_quotas.values())):
                     try:
+                        self.logger.debug("准备滚动获取更多内容...")
                         await self._scroll_for_more_content()
                         await asyncio.sleep(2)  # 等待内容加载
                     except asyncio.CancelledError:
@@ -310,6 +359,14 @@ class AutoXSession:
                         return
                     except Exception as e:
                         self.logger.debug(f"Error scrolling: {e}")
+                        
+            # 循环结束原因分析
+            self.logger.info("=== 循环结束原因分析 ===")
+            self.logger.info(f"总动作限制: {self.total_actions} >= {self.config.max_total_actions} ? {self.total_actions >= self.config.max_total_actions}")
+            self.logger.info(f"时间限制: 当前时间 >= 最大结束时间 ? {datetime.now() >= max_end_time}")
+            self.logger.info(f"运行状态: {self.is_running}")
+            self.logger.info(f"配额状态: {[(action.action_type.value, action_quotas[action.action_type]) for action in enabled_actions]}")
+            self.logger.info(f"所有配额耗尽: {all(quota <= 0 for quota in action_quotas.values())}")
                         
         except Exception as e:
             self.logger.error(f"Error in configured actions execution: {e}")
@@ -340,28 +397,254 @@ class AutoXSession:
                 self.logger.error(f"页面不可用: {e}")
                 raise Exception(f"页面不可用: {e}")
             
-            # 如果有搜索关键词，使用搜索；否则使用时间线
+            current_url = self.browser_manager.page.url
+            self.logger.info(f"当前页面URL: {current_url}")
+            
+            # 确定目标URL
+            target_url = None
             if self.search_keywords:
                 # 选择一个关键词进行搜索
                 keyword = random.choice(self.search_keywords)
+                target_url = f"https://x.com/search?q={keyword}"
                 self.logger.info(f"Using search results for keyword: {keyword}")
-                await self.browser_manager.page.goto(f"https://x.com/search?q={keyword}", timeout=30000)
-            elif self.config.target.keywords:
+            elif self.config.target.keywords and len(self.config.target.keywords) > 0:
                 # 使用配置的关键词
                 keyword = random.choice(self.config.target.keywords)
+                target_url = f"https://x.com/search?q={keyword}"
                 self.logger.info(f"Using configured keyword: {keyword}")
-                await self.browser_manager.page.goto(f"https://x.com/search?q={keyword}", timeout=30000)
             else:
                 # 使用主页时间线
+                target_url = "https://x.com/home"
                 self.logger.info("Using home timeline")
-                await self.browser_manager.page.goto("https://x.com/home", timeout=30000)
             
-            await self.browser_manager.page.wait_for_load_state("networkidle", timeout=10000)
+            # 检查是否需要导航
+            need_navigation = True
+            if target_url == "https://x.com/home":
+                # 如果目标是主页，检查当前是否已经在主页
+                if "x.com/home" in current_url or "twitter.com/home" in current_url:
+                    self.logger.info("✅ 已在主页，无需重新导航")
+                    need_navigation = False
+            
+            # 只有在需要时才导航
+            if need_navigation:
+                self.logger.info(f"导航到: {target_url}")
+                await self.browser_manager.page.goto(target_url, timeout=20000)
+                
+                # 等待页面加载，使用更宽松的设置
+                try:
+                    await self.browser_manager.page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    self.logger.info("页面DOM加载完成")
+                except Exception as e:
+                    self.logger.warning(f"等待DOM加载超时: {e}，继续执行")
+                
+                # 等待网络空闲（可选，允许失败）
+                try:
+                    await self.browser_manager.page.wait_for_load_state("networkidle", timeout=8000)
+                    self.logger.info("页面网络空闲")
+                except Exception as e:
+                    self.logger.debug(f"等待网络空闲超时: {e}，继续执行")
+            
+            # 等待页面稳定
+            await asyncio.sleep(2)
+            
+            # 手动检查并处理Cookie弹窗
+            await self._handle_cookie_popup_manual()
+            
+            self.logger.info("✅ 内容源准备完成")
             return "timeline"
             
         except Exception as e:
             self.logger.error(f"获取内容源失败: {e}")
             raise
+    
+    async def _handle_cookie_popup_manual(self):
+        """手动检查并处理Cookie弹窗"""
+        try:
+            # 等待页面完全加载
+            await asyncio.sleep(2)
+            
+            # 检查是否存在Cookie同意遮罩层
+            cookie_mask = self.browser_manager.page.locator('[data-testid="twc-cc-mask"]')
+            mask_count = await cookie_mask.count()
+            
+            if mask_count > 0:
+                self.logger.warning(f"⚠️ 检测到 {mask_count} 个Cookie遮罩层，尝试处理...")
+                
+                # 尝试多种方式关闭Cookie弹窗
+                success = await self._dismiss_cookie_popup_manual()
+                
+                if success:
+                    self.logger.info("✅ Cookie弹窗已手动处理成功")
+                    await asyncio.sleep(2)  # 等待弹窗完全消失
+                else:
+                    self.logger.error("❌ 无法处理Cookie弹窗，这会影响后续操作")
+                    # 强制移除遮罩层
+                    await self._force_remove_cookie_mask()
+            else:
+                self.logger.debug("✅ 未检测到Cookie弹窗遮罩")
+                
+        except Exception as e:
+            self.logger.warning(f"处理Cookie弹窗时出错: {e}")
+    
+    async def _dismiss_cookie_popup_manual(self) -> bool:
+        """手动关闭Cookie弹窗的多种方法"""
+        methods = [
+            ("接受所有Cookies", self._accept_all_cookies),
+            ("点击关闭按钮", self._click_close_button),
+            ("按ESC键", self._press_escape),
+            ("点击外部区域", self._click_outside),
+            ("强制移除遮罩", self._force_remove_cookie_mask)
+        ]
+        
+        for method_name, method_func in methods:
+            try:
+                self.logger.info(f"尝试方法: {method_name}")
+                success = await method_func()
+                if success:
+                    self.logger.info(f"✅ {method_name} 成功")
+                    return True
+                await asyncio.sleep(1)
+            except Exception as e:
+                self.logger.debug(f"❌ {method_name} 失败: {e}")
+                continue
+        
+        return False
+    
+    async def _accept_all_cookies(self) -> bool:
+        """接受所有Cookies"""
+        selectors = [
+            'button:has-text("Accept all cookies")',
+            'button:has-text("接受所有Cookie")',
+            'button:has-text("Accept")',
+            'button:has-text("接受")',
+            '[data-testid="BottomBar"] button',
+            'div[data-testid="BottomBar"] button[role="button"]'
+        ]
+        
+        for selector in selectors:
+            try:
+                button = self.browser_manager.page.locator(selector)
+                if await button.count() > 0:
+                    await button.first.click(timeout=5000)
+                    await asyncio.sleep(2)
+                    # 检查遮罩是否消失
+                    if await self.browser_manager.page.locator('[data-testid="twc-cc-mask"]').count() == 0:
+                        return True
+            except Exception as e:
+                self.logger.debug(f"点击按钮失败 {selector}: {e}")
+                continue
+        return False
+    
+    async def _click_close_button(self) -> bool:
+        """点击关闭按钮"""
+        selectors = [
+            'button[aria-label*="close"]',
+            'button[aria-label*="Close"]',
+            'button[aria-label*="关闭"]',
+            'svg[data-testid="icon-x"]',
+            '[data-testid="icon-x"]'
+        ]
+        
+        for selector in selectors:
+            try:
+                button = self.browser_manager.page.locator(selector)
+                if await button.count() > 0:
+                    await button.first.click(timeout=5000)
+                    await asyncio.sleep(2)
+                    if await self.browser_manager.page.locator('[data-testid="twc-cc-mask"]').count() == 0:
+                        return True
+            except Exception as e:
+                self.logger.debug(f"点击关闭按钮失败 {selector}: {e}")
+                continue
+        return False
+    
+    async def _press_escape(self) -> bool:
+        """按ESC键"""
+        try:
+            await self.browser_manager.page.keyboard.press('Escape')
+            await asyncio.sleep(2)
+            return await self.browser_manager.page.locator('[data-testid="twc-cc-mask"]').count() == 0
+        except Exception as e:
+            self.logger.debug(f"按ESC键失败: {e}")
+            return False
+    
+    async def _click_outside(self) -> bool:
+        """点击外部区域"""
+        try:
+            # 点击页面多个位置
+            positions = [
+                {'x': 100, 'y': 100},
+                {'x': 500, 'y': 200},
+                {'x': 800, 'y': 300}
+            ]
+            
+            for pos in positions:
+                try:
+                    await self.browser_manager.page.click('body', position=pos, timeout=3000)
+                    await asyncio.sleep(1)
+                    if await self.browser_manager.page.locator('[data-testid="twc-cc-mask"]').count() == 0:
+                        return True
+                except:
+                    continue
+            return False
+        except Exception as e:
+            self.logger.debug(f"点击外部区域失败: {e}")
+            return False
+    
+    async def _force_remove_cookie_mask(self) -> bool:
+        """强制移除Cookie遮罩层"""
+        try:
+            self.logger.warning("🔧 强制移除Cookie遮罩层...")
+            await self.browser_manager.page.evaluate("""
+                // 移除Cookie同意遮罩
+                const masks = document.querySelectorAll('[data-testid="twc-cc-mask"]');
+                console.log('找到遮罩数量:', masks.length);
+                masks.forEach((mask, index) => {
+                    console.log('移除遮罩', index, mask);
+                    mask.remove();
+                });
+                
+                // 移除所有可能的覆盖层
+                const layers = document.querySelectorAll('#layers > div');
+                layers.forEach((layer, index) => {
+                    const style = window.getComputedStyle(layer);
+                    if (style.position === 'fixed' && 
+                        (style.zIndex > 1000 || 
+                         layer.classList.contains('r-1pi2tsx') ||
+                         layer.classList.contains('r-1d2f490') ||
+                         layer.classList.contains('r-1xcajam'))) {
+                        console.log('移除覆盖层', index, layer);
+                        layer.remove();
+                    }
+                });
+                
+                // 移除任何阻止交互的元素
+                const blockers = document.querySelectorAll('div[style*="pointer-events"]');
+                blockers.forEach((blocker, index) => {
+                    const style = window.getComputedStyle(blocker);
+                    if (style.pointerEvents === 'auto' && style.position === 'fixed') {
+                        console.log('移除阻挡元素', index, blocker);
+                        blocker.remove();
+                    }
+                });
+                
+                return true;
+            """)
+            
+            await asyncio.sleep(2)
+            mask_count = await self.browser_manager.page.locator('[data-testid="twc-cc-mask"]').count()
+            success = mask_count == 0
+            
+            if success:
+                self.logger.info("✅ 强制移除遮罩成功")
+            else:
+                self.logger.warning(f"⚠️ 强制移除后仍有 {mask_count} 个遮罩")
+            
+            return success
+            
+        except Exception as e:
+            self.logger.error(f"强制移除遮罩失败: {e}")
+            return False
     
     async def _get_content_items(self, source_type: str, action_type: ActionType) -> List[Dict[str, Any]]:
         """获取内容项"""
@@ -885,15 +1168,21 @@ def main():
         
         async def run_with_account():
             session = AutoXSession(config, args.search, account)
+            task_started = False
             try:
                 await session.start()
+                task_started = True  # 标记任务已开始
                 await session.run_task()
-                # 更新账号使用状态
+                # 更新账号使用状态 - 只有任务真正开始后才设置冷却
                 account_manager.update_account_usage(account.account_id, set_cooldown=True)
                 print(f"✅ 账号 {account.account_id} 执行完成")
             except Exception as e:
                 print(f"❌ 账号 {account.account_id} 执行失败: {e}")
-                account_manager.update_account_usage(account.account_id, set_cooldown=True)
+                # 只有在任务开始后失败才设置冷却，启动失败不设置冷却
+                if task_started:
+                    account_manager.update_account_usage(account.account_id, set_cooldown=True)
+                else:
+                    print(f"ℹ️ 账号 {account.account_id} 启动失败，不设置冷却")
         
         asyncio.run(run_with_account())
     else:
