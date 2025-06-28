@@ -1,0 +1,46 @@
+{
+    "name": "温和清理测试",
+    "description": "测试温和清理修复后的执行效果",
+    "max_duration_minutes": 10,
+    "max_total_actions": 50,
+    "randomize_intervals": true,
+    "target": {
+        "hashtags": ["#tech"],
+        "is_live": true,
+        "min_likes": 1,
+        "content_languages": ["en"]
+    },
+    "actions": [
+        {
+            "action_type": "like",
+            "count": 20,
+            "min_interval": 5,
+            "max_interval": 15,
+            "conditions": {
+                "min_likes": 3,
+                "max_likes": 2000,
+                "min_views": 30,
+                "max_content_length": 300
+            }
+        },
+        {
+            "action_type": "comment",
+            "count": 10,
+            "min_interval": 10,
+            "max_interval": 30,
+            "use_ai_comment": true,
+            "ai_comment_fallback": true,
+            "comment_templates": [
+                "Great insights! 🚀",
+                "Thanks for sharing this!",
+                "Interesting perspective 🤔"
+            ],
+            "conditions": {
+                "min_likes": 1,
+                "max_likes": 1500,
+                "min_views": 30,
+                "max_content_length": 280
+            }
+        }
+    ]
+} 

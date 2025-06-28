@@ -93,6 +93,9 @@ class TargetConfig:
     languages: List[str] = field(default_factory=lambda: ['en', 'zh'])  # 语言限制
     content_languages: List[str] = field(default_factory=lambda: ['en', 'zh'])  # 内容语言限制（兼容字段）
     
+    # 搜索排序设置
+    is_live: bool = False             # True=最新推文, False=热门推文 (仅在搜索模式下有效)
+    
     # 内容过滤
     min_likes: int = 0                 # 最小点赞数
     max_age_hours: int = 24           # 内容最大年龄(小时)
@@ -105,6 +108,17 @@ class TargetConfig:
             self.languages = self.content_languages
         elif not self.content_languages and self.languages:
             self.content_languages = self.languages
+        
+        # 验证hashtags和keywords是否冲突
+        self._validate_content_source()
+    
+    def _validate_content_source(self):
+        """验证内容源配置"""
+        if self.hashtags and self.keywords:
+            raise ValueError("hashtags和keywords不能同时使用，它们是互斥的内容获取方式。请选择其中一种。")
+        
+        if not self.hashtags and not self.keywords and self.source not in ["timeline", "home"]:
+            print("⚠️  警告: 未配置hashtags或keywords，将使用主页时间线作为内容源")
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -115,6 +129,7 @@ class TargetConfig:
             'users': self.users,
             'languages': self.languages,
             'content_languages': self.content_languages,
+            'is_live': self.is_live,
             'min_likes': self.min_likes,
             'max_age_hours': self.max_age_hours,
             'exclude_keywords': self.exclude_keywords
@@ -131,6 +146,7 @@ class TargetConfig:
         data_copy.setdefault('users', [])
         data_copy.setdefault('languages', ['en', 'zh'])
         data_copy.setdefault('content_languages', data_copy['languages'])
+        data_copy.setdefault('is_live', False)
         data_copy.setdefault('min_likes', 0)
         data_copy.setdefault('max_age_hours', 24)
         data_copy.setdefault('exclude_keywords', [])

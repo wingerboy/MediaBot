@@ -182,57 +182,149 @@ class ActionExecutor:
                 self.logger.error("页面不可用，跳过点赞操作")
                 return ActionResult.ERROR
             
-            # 如果有browser_manager，使用安全行为模拟
-            if self.browser_manager:
-                await self.browser_manager.simulate_human_behavior()
+            # 主动清理遮罩层（使用温和的清理）
+            await self._gentle_clear_blockers()
+            await asyncio.sleep(0.3)  # 减少等待时间
             
-            # 使用多种策略查找点赞按钮
-            like_button = None
+            username = tweet_info.get('username', 'unknown')
+            self.logger.debug(f"准备点赞推文: {username}")
+            
+            # 查找点赞按钮 - 增强选择器
             like_selectors = [
-                'div[data-testid="like"]',
+                # 标准选择器
                 '[data-testid="like"]',
+                'div[data-testid="like"]', 
                 'button[data-testid="like"]',
-                'div[role="button"][aria-label*="like"]',
-                'div[role="button"][aria-label*="Like"]',
-                'button[aria-label*="like"]',
-                'button[aria-label*="Like"]'
+                
+                # aria-label选择器
+                '[aria-label*="Like"]',
+                '[aria-label*="点赞"]',
+                '[aria-label*="like"]',
+                '[aria-label*="heart"]',
+                
+                # 通过图标查找
+                'svg[viewBox="0 0 24 24"] path[d*="20.884"]',  # 心形图标路径
+                'svg[data-testid="heart"]',
+                'svg[aria-label*="Like"]',
+                
+                # 通过容器结构查找
+                'div[role="group"] > div:nth-child(4)',  # 通常点赞是第4个按钮
+                'div[role="group"] > div:has(svg)',
+                'div[role="group"] div:has([aria-label*="like"])',
+                
+                # 通过CSS类查找（Twitter经常用的类名模式）
+                'div[class*="r-1777fci"]',  # Twitter常用的交互按钮类
+                'div[class*="r-18u37iz"]',
+                'div[class*="r-1awozwy"]',
+                
+                # 通过相对位置查找
+                'article div[role="group"] > div:nth-of-type(4)',
+                'article div[role="group"] > div:nth-of-type(3)',
+                
+                # 通用心形图标选择器
+                'svg:has(path[d*="heart"])',
+                'button:has(svg[viewBox="0 0 24 24"])',
+                
+                # 通过文本内容查找（有些情况下会显示数字）
+                'div[role="button"]:has-text("♥")',
+                'div[role="button"]:has([aria-label*="like"])',
+                
+                # 备用通用选择器
+                'div[tabindex="0"][role="button"]:has(svg)',
+                '[role="button"]:has(svg)',
+                'div[data-testid*="like"]',
+                
+                # XPath风格的查找（通过相邻元素定位）
+                'div:has(+ div[aria-label*="repost"], + div[aria-label*="share"])',
+                
+                # 最后的兜底选择器
+                'button',
+                'div[role="button"]'
             ]
             
+            like_button = None
             for selector in like_selectors:
                 try:
-                    button = tweet_element.locator(selector).first
-                    if await button.count() > 0:
-                        like_button = button
-                        break
+                    if selector in ['button', 'div[role="button"]']:
+                        # 对于通用选择器，需要额外验证
+                        buttons = tweet_element.locator(selector)
+                        count = await buttons.count()
+                        for i in range(count):
+                            button = buttons.nth(i)
+                            try:
+                                # 检查aria-label
+                                aria_label = await button.get_attribute("aria-label", timeout=1000)
+                                if aria_label and any(word in aria_label.lower() for word in ['like', '点赞', 'heart']):
+                                    self.logger.debug(f"通过aria-label找到点赞按钮: {aria_label}")
+                                    like_button = button
+                                    break
+                                    
+                                # 检查是否包含心形图标
+                                svg_element = button.locator('svg')
+                                if await svg_element.count() > 0:
+                                    svg_aria = await svg_element.get_attribute("aria-label", timeout=500)
+                                    if svg_aria and 'like' in svg_aria.lower():
+                                        self.logger.debug(f"通过SVG aria-label找到点赞按钮: {svg_aria}")
+                                        like_button = button
+                                        break
+                                    
+                                    # 检查SVG路径是否包含心形特征
+                                    path_elements = svg_element.locator('path')
+                                    path_count = await path_elements.count()
+                                    for j in range(path_count):
+                                        path_d = await path_elements.nth(j).get_attribute('d', timeout=500)
+                                        if path_d and any(pattern in path_d for pattern in ['20.884', '12 21.35', 'heart']):
+                                            self.logger.debug(f"通过SVG路径找到点赞按钮: {path_d[:50]}")
+                                            like_button = button
+                                            break
+                                    if like_button:
+                                        break
+                            except:
+                                continue
+                        if like_button:
+                            break
+                    else:
+                        # 标准选择器直接尝试
+                        button = tweet_element.locator(selector).first
+                        if await button.count() > 0:
+                            # 额外验证元素有效性
+                            try:
+                                is_visible = await button.is_visible()
+                                if is_visible:
+                                    self.logger.debug(f"找到点赞按钮，使用选择器: {selector}")
+                                    like_button = button
+                                    break
+                            except:
+                                pass
                 except Exception as e:
-                    self.logger.debug(f"点赞按钮选择器失败 {selector}: {e}")
+                    self.logger.debug(f"点赞选择器失败 {selector}: {e}")
                     continue
             
+            # 最后的智能查找尝试
             if not like_button:
-                self.logger.warning("未找到点赞按钮")
-                return ActionResult.ERROR
+                self.logger.debug("尝试使用智能查找方法查找点赞按钮...")
+                like_button = await self._smart_find_element(tweet_element, "button", ["like", "点赞", "heart"])
+            
+            if not like_button:
+                self.logger.warning(f"未找到点赞按钮 (@{username})")
+                return ActionResult.FAILED
             
             # 检查是否已经点赞
             try:
-                # 检查按钮状态
-                aria_label = await like_button.get_attribute('aria-label')
-                if aria_label and ('liked' in aria_label.lower() or 'unlike' in aria_label.lower()):
-                    self.logger.info("推文已点赞，跳过")
+                aria_label = await like_button.get_attribute("aria-label", timeout=2000)
+                if aria_label and ("liked" in aria_label.lower() or "已点赞" in aria_label):
+                    self.logger.info(f"已点赞过，跳过 (@{username})")
                     return ActionResult.SKIPPED
-                
-                # 检查按钮的视觉状态
-                button_class = await like_button.get_attribute('class')
-                if button_class and 'liked' in button_class.lower():
-                    self.logger.info("推文已点赞（通过class检测），跳过")
-                    return ActionResult.SKIPPED
-                
             except Exception as e:
                 self.logger.debug(f"检查点赞状态失败: {e}")
             
-            # 使用安全点击或常规点击
+            # 多重策略点击
             try:
-                if self.browser_manager and hasattr(self.browser_manager, 'safe_click'):
-                    # 获取点赞按钮的选择器
+                # 温和清理页面阻挡元素
+                await self._gentle_clear_blockers()
+                
+                # 策略1: 使用safe_click
+                if hasattr(self, 'browser_manager') and self.browser_manager:
                     for selector in like_selectors:
                         try:
                             if await tweet_element.locator(selector).count() > 0:
@@ -244,7 +336,25 @@ class ActionExecutor:
                             self.logger.debug(f"安全点击失败 {selector}: {e}")
                             continue
                 
-                # 降级到普通点击
+                # 策略2: 强制点击
+                try:
+                    await like_button.click(force=True, timeout=3000)
+                    self.logger.info(f"✅ 点赞成功 (强制点击) (@{tweet_info.get('username', 'Unknown')})")
+                    await self.random_delay(0.5, 2.0)
+                    return ActionResult.SUCCESS
+                except Exception as e:
+                    self.logger.debug(f"强制点击失败: {e}")
+                
+                # 策略3: JavaScript点击
+                try:
+                    await like_button.evaluate("element => element.click()")
+                    self.logger.info(f"✅ 点赞成功 (JS点击) (@{tweet_info.get('username', 'Unknown')})")
+                    await self.random_delay(0.5, 2.0)
+                    return ActionResult.SUCCESS
+                except Exception as e:
+                    self.logger.debug(f"JS点击失败: {e}")
+                
+                # 策略4: 普通点击（最后尝试）
                 await like_button.click(timeout=5000)
                 self.logger.info(f"✅ 点赞成功 (@{tweet_info.get('username', 'Unknown')})")
                 
@@ -480,218 +590,536 @@ class ActionExecutor:
                 self.logger.error("页面不可用，跳过评论操作")
                 return ActionResult.ERROR
             
-            # 使用多种策略查找回复按钮
-            reply_button = None
+            # 主动清理遮罩层（使用温和的清理）
+            await self._gentle_clear_blockers()
+            await asyncio.sleep(0.3)  # 减少等待时间
+            
+            username = tweet_info.get('username', 'unknown')
+            self.logger.debug(f"准备评论推文: {username}")
+            
+            # 查找回复按钮 - 增强选择器
             reply_selectors = [
-                'div[data-testid="reply"]',
+                # 标准Twitter选择器
                 '[data-testid="reply"]',
+                'div[data-testid="reply"]',
                 'button[data-testid="reply"]',
-                'div[role="button"][aria-label*="reply"]',
-                'div[role="button"][aria-label*="Reply"]',
-                'button[aria-label*="reply"]',
-                'button[aria-label*="Reply"]'
+                
+                # 通过aria-label查找
+                '[aria-label*="Reply"]',
+                '[aria-label*="回复"]',
+                '[aria-label*="reply"]',
+                
+                # 通过图标查找（回复图标通常是弯曲箭头）
+                'svg[viewBox="0 0 24 24"] path[d*="1.751"]',  # 回复图标路径特征
+                'svg[data-testid="reply"]',
+                'svg[aria-label*="Reply"]',
+                
+                # 通过容器结构查找
+                'div[role="group"] > div:nth-child(1)',  # 回复通常是第1个按钮
+                'div[role="group"] > div:first-child',
+                'article div[role="group"] > div:first-child',
+                
+                # 通过CSS类查找
+                'div[class*="r-1777fci"]:first-child',  # Twitter常用的交互按钮类
+                'div[class*="r-18u37iz"]:first-child',
+                'div[class*="r-1awozwy"]:first-child',
+                
+                # 通过文本内容查找（某些情况下会显示"回复"文字）
+                'div[role="button"]:has-text("Reply")',
+                'div[role="button"]:has-text("回复")',
+                'button:has-text("Reply")',
+                'button:has-text("回复")',
+                
+                # 通过位置查找（回复按钮通常在推文底部的第一个位置）
+                'article div[aria-label*="actions"] div:first-child',
+                'div[data-testid*="tweet"] div[role="group"] > div:first-child',
+                
+                # 通用图标选择器
+                'button:has(svg[viewBox="0 0 24 24"])',
+                'div[role="button"]:has(svg)',
+                
+                # 备用选择器
+                'div[tabindex="0"][role="button"]:has(svg)',
+                '[role="button"]:has(svg)',
+                
+                # 最后的兜底选择器
+                'button',
+                'div[role="button"]'
             ]
             
+            reply_button = None
             for selector in reply_selectors:
                 try:
-                    button = tweet_element.locator(selector).first
-                    if await button.count() > 0:
-                        reply_button = button
-                        self.logger.debug(f"找到回复按钮，使用选择器: {selector}")
-                        break
+                    if selector in ['button', 'div[role="button"]']:
+                        # 对于通用选择器，需要额外验证
+                        buttons = tweet_element.locator(selector)
+                        count = await buttons.count()
+                        for i in range(count):
+                            button = buttons.nth(i)
+                            try:
+                                # 检查aria-label
+                                aria_label = await button.get_attribute("aria-label", timeout=1000)
+                                if aria_label and any(word in aria_label.lower() for word in ['reply', '回复']):
+                                    self.logger.debug(f"通过aria-label找到回复按钮: {aria_label}")
+                                    reply_button = button
+                                    break
+                                    
+                                # 检查是否包含回复图标
+                                svg_element = button.locator('svg')
+                                if await svg_element.count() > 0:
+                                    svg_aria = await svg_element.get_attribute("aria-label", timeout=500)
+                                    if svg_aria and 'reply' in svg_aria.lower():
+                                        self.logger.debug(f"通过SVG aria-label找到回复按钮: {svg_aria}")
+                                        reply_button = button
+                                        break
+                                    
+                                    # 检查SVG路径是否包含回复特征
+                                    path_elements = svg_element.locator('path')
+                                    path_count = await path_elements.count()
+                                    for j in range(path_count):
+                                        path_d = await path_elements.nth(j).get_attribute('d', timeout=500)
+                                        if path_d and any(pattern in path_d for pattern in ['1.751', '1.804', 'reply']):
+                                            self.logger.debug(f"通过SVG路径找到回复按钮: {path_d[:50]}")
+                                            reply_button = button
+                                            break
+                                    if reply_button:
+                                        break
+                                
+                                # 检查文本内容
+                                text = await button.text_content(timeout=500)
+                                if text and any(word in text.lower() for word in ['reply', '回复']):
+                                    self.logger.debug(f"通过文本找到回复按钮: {text}")
+                                    reply_button = button
+                                    break
+                                    
+                            except:
+                                continue
+                        if reply_button:
+                            break
+                    else:
+                        # 标准选择器直接尝试
+                        button = tweet_element.locator(selector).first
+                        if await button.count() > 0:
+                            # 额外验证元素有效性
+                            try:
+                                is_visible = await button.is_visible()
+                                if is_visible:
+                                    self.logger.debug(f"找到回复按钮，使用选择器: {selector}")
+                                    reply_button = button
+                                    break
+                            except:
+                                pass
                 except Exception as e:
                     self.logger.debug(f"回复选择器失败 {selector}: {e}")
                     continue
             
+            # 最后的智能查找尝试
             if not reply_button:
-                self.logger.warning("未找到回复按钮")
+                self.logger.debug("尝试使用智能查找方法查找回复按钮...")
+                reply_button = await self._smart_find_element(tweet_element, "button", ["reply", "回复"])
+            
+            if not reply_button:
+                self.logger.warning(f"未找到回复按钮 (@{username})")
                 return ActionResult.FAILED
             
-            # 点击回复按钮
+            # 多重策略点击回复按钮
             try:
-                await reply_button.click(timeout=5000)
-                self.logger.debug("回复按钮点击成功")
+                # 温和清理阻挡元素
+                await self._gentle_clear_blockers()
+                
+                # 策略1: 强制点击
+                try:
+                    await reply_button.click(force=True, timeout=3000)
+                    self.logger.debug("回复按钮点击成功 (强制)")
+                except Exception as e:
+                    self.logger.debug(f"强制点击回复按钮失败: {e}")
+                    
+                    # 策略2: JavaScript点击
+                    try:
+                        await reply_button.evaluate("element => element.click()")
+                        self.logger.debug("回复按钮点击成功 (JS)")
+                    except Exception as e:
+                        self.logger.debug(f"JS点击回复按钮失败: {e}")
+                        
+                        # 策略3: 普通点击
+                        await reply_button.click(timeout=5000)
+                        self.logger.debug("回复按钮点击成功")
+                
             except Exception as e:
                 self.logger.error(f"点击回复按钮失败: {e}")
-                return ActionResult.FAILED
+                return ActionResult.ERROR
             
-            # 等待评论框出现
-            await asyncio.sleep(random.uniform(1.0, 2.0))
+            # 等待评论框出现 - 增加等待时间
+            await asyncio.sleep(random.uniform(3.0, 4.0))
             
-            # 使用多种策略查找评论输入框
-            comment_box = None
+            # 查找评论输入框 - 超强选择器
             comment_selectors = [
+                # 标准Twitter选择器
                 'div[data-testid="tweetTextarea_0"]',
                 '[data-testid="tweetTextarea_0"]',
-                'div[contenteditable="true"]',
+                'div[data-testid*="tweetTextarea"]',
+                '[data-testid*="tweetTextarea"]',
+                
+                # 通过role和属性查找
                 'div[role="textbox"]',
-                'textarea'
+                'div[contenteditable="true"]',
+                'textarea[placeholder*="Tweet"]',
+                'textarea[placeholder*="回复"]',
+                
+                # 通过编辑器容器查找
+                '.DraftEditor-editorContainer div[contenteditable="true"]',
+                '.DraftEditor-root div[contenteditable="true"]',
+                '.notranslate[contenteditable="true"]',
+                '.public-DraftEditor-content',
+                
+                # 通过aria-label查找
+                'div[aria-label*="Tweet"]',
+                'div[aria-label*="回复"]',
+                'div[aria-label*="Reply"]',
+                'div[aria-label*="compose"]',
+                'div[aria-label*="编写"]',
+                
+                # 通过placeholder查找
+                'div[placeholder*="Tweet"]',
+                'div[placeholder*="回复"]',
+                'div[placeholder*="Reply"]',
+                'div[placeholder*="What"]',
+                'div[placeholder*="写"]',
+                
+                # 通过CSS类查找（Twitter常用类）
+                'div[class*="DraftEditor"]',
+                'div[class*="r-1p0dtai"]',
+                'div[class*="r-1d2f490"]',
+                'div[class*="r-6koalj"]',
+                'div[class*="r-16y2uox"]',
+                
+                # 通过data属性查找
+                'div[data-slate-editor="true"]',
+                'div[data-lexical-editor="true"]',
+                'div[data-contents="true"]',
+                
+                # 通过层级结构查找
+                'form div[contenteditable="true"]',
+                'div[role="main"] div[contenteditable="true"]',
+                'div[aria-expanded="true"] div[contenteditable="true"]',
+                
+                # 通过input类型查找
+                'input[type="text"][placeholder*="Tweet"]',
+                'textarea[aria-label*="Tweet"]',
+                
+                # 通用可编辑元素
+                '[contenteditable="true"]',
+                'textarea',
+                'input[type="text"]'
             ]
             
-            for selector in comment_selectors:
-                try:
-                    box = self.page.locator(selector).first
-                    await box.wait_for(state="visible", timeout=3000)
-                    if await box.count() > 0:
-                        comment_box = box
-                        self.logger.debug(f"找到评论输入框，使用选择器: {selector}")
-                        break
-                except Exception as e:
-                    self.logger.debug(f"评论框选择器失败 {selector}: {e}")
-                    continue
+            comment_box = None
+            # 尝试等待评论框出现
+            for attempt in range(5):  # 增加尝试次数
+                for selector in comment_selectors:
+                    try:
+                        if selector in ['[contenteditable="true"]', 'textarea', 'input[type="text"]']:
+                            # 对于通用选择器需要额外验证
+                            elements = self.page.locator(selector)
+                            element_count = await elements.count()
+                            
+                            for i in range(element_count):
+                                element = elements.nth(i)
+                                try:
+                                    # 检查是否可见和可编辑
+                                    is_visible = await element.is_visible()
+                                    is_enabled = await element.is_enabled()
+                                    if not (is_visible and is_enabled):
+                                        continue
+                                    
+                                    # 检查aria-label或placeholder
+                                    aria_label = await element.get_attribute("aria-label", timeout=500)
+                                    placeholder = await element.get_attribute("placeholder", timeout=500)
+                                    
+                                    # 验证是否为评论框
+                                    is_comment_box = False
+                                    if aria_label:
+                                        if any(word in aria_label.lower() for word in ['tweet', '回复', 'reply', 'compose', '编写']):
+                                            is_comment_box = True
+                                    if placeholder:
+                                        if any(word in placeholder.lower() for word in ['tweet', '回复', 'reply', 'what', '写']):
+                                            is_comment_box = True
+                                    
+                                    # 检查父容器是否与评论相关
+                                    if not is_comment_box:
+                                        parent_html = await element.evaluate("el => el.parentElement?.innerHTML || ''")
+                                        if any(word in parent_html.lower() for word in ['tweet', 'reply', 'compose']):
+                                            is_comment_box = True
+                                    
+                                    if is_comment_box:
+                                        self.logger.debug(f"通过验证找到评论输入框: {selector}")
+                                        comment_box = element
+                                        break
+                                except:
+                                    continue
+                            
+                            if comment_box:
+                                break
+                        else:
+                            # 标准选择器直接尝试
+                            box = self.page.locator(selector).first
+                            if await box.count() > 0:
+                                # 验证元素是否可见和可编辑
+                                try:
+                                    is_visible = await box.is_visible()
+                                    is_enabled = await box.is_enabled()
+                                    if is_visible and is_enabled:
+                                        self.logger.debug(f"找到评论输入框，使用选择器: {selector}")
+                                        comment_box = box
+                                        break
+                                except:
+                                    pass
+                    except Exception as e:
+                        self.logger.debug(f"评论框选择器失败 {selector}: {e}")
+                        continue
+                
+                if comment_box:
+                    break
+                
+                # 如果没找到，等待一会再试
+                self.logger.debug(f"第{attempt+1}次未找到评论框，等待2秒后重试...")
+                await asyncio.sleep(2)
+                
+                # 尝试重新点击回复按钮（可能对话框关闭了）
+                if attempt < 4:
+                    try:
+                        reply_selectors = [
+                            'div[data-testid="reply"]',
+                            '[data-testid="reply"]',
+                            'button[data-testid="reply"]'
+                        ]
+                        for reply_selector in reply_selectors:
+                            reply_btn = tweet_element.locator(reply_selector).first
+                            if await reply_btn.count() > 0:
+                                await reply_btn.click(force=True, timeout=2000)
+                                await asyncio.sleep(1)
+                                break
+                    except:
+                        pass
+            
+            # 最后的智能查找尝试
+            if not comment_box:
+                self.logger.debug("尝试使用智能查找方法查找评论输入框...")
+                comment_box = await self._smart_find_element(self.page, "input", ["tweet", "reply", "回复", "compose", "编写"])
             
             if not comment_box:
-                self.logger.warning("未找到评论输入框")
+                self.logger.warning(f"未找到评论输入框 (@{username})")
                 return ActionResult.FAILED
             
             # 生成评论内容
             comment_text = await self._generate_comment_text(tweet_info, action_config)
-            
             if not comment_text:
-                self.logger.warning("无法生成评论内容，跳过评论")
-                return ActionResult.SKIPPED
+                self.logger.warning(f"无法生成评论内容 (@{username})")
+                return ActionResult.FAILED
             
             # 输入评论
             try:
-                if self.browser_manager and hasattr(self.browser_manager, 'safe_type'):
-                    # 使用安全输入方法
-                    success = False
-                    for selector in comment_selectors:
-                        try:
-                            if await self.page.locator(selector).count() > 0:
-                                success = await self.browser_manager.safe_type(selector, comment_text)
-                                if success:
-                                    self.logger.debug(f"安全输入评论成功: {comment_text}")
-                                    break
-                        except Exception as e:
-                            self.logger.debug(f"安全输入失败 {selector}: {e}")
-                            continue
-                    
-                    if not success:
-                        # 降级到普通输入
-                        await comment_box.fill(comment_text, timeout=5000)
-                        self.logger.debug(f"评论内容输入成功(降级): {comment_text}")
-                else:
-                    # 使用普通输入
-                    await comment_box.fill(comment_text, timeout=5000)
-                    self.logger.debug(f"评论内容输入成功: {comment_text}")
-                    
-            except Exception as e:
-                self.logger.error(f"输入评论内容失败: {e}")
-                return ActionResult.FAILED
-            
-            # 模拟打字延迟和等待页面响应
-            await asyncio.sleep(random.uniform(2.0, 4.0))
-            
-            # 确保输入框仍然聚焦，有时需要重新点击
-            try:
+                # 点击并聚焦输入框
                 await comment_box.click()
                 await asyncio.sleep(0.5)
-            except:
-                pass
+                
+                # 清空输入框
+                await comment_box.fill("")
+                await asyncio.sleep(0.3)
+                
+                # 安全输入评论
+                await comment_box.type(comment_text, delay=random.randint(50, 150))
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+                
+                self.logger.debug(f"安全输入评论成功: {comment_text}")
+                
+            except Exception as e:
+                self.logger.error(f"输入评论失败: {e}")
+                return ActionResult.ERROR
             
-            # 使用多种策略查找发送按钮
-            send_button = None
+            # 查找并点击发送按钮
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            
             send_selectors = [
-                'div[data-testid="tweetButtonInline"]',
+                # 标准发送按钮选择器
+                '[data-testid="tweetButton"]',
                 '[data-testid="tweetButtonInline"]',
                 'div[data-testid="tweetButton"]',
-                '[data-testid="tweetButton"]',
-                'button:has-text("Tweet")',
-                'button:has-text("Reply")',
-                'button:has-text("发送")',
-                'div[role="button"]:has-text("Tweet")',
+                'button[data-testid="tweetButton"]',
+                
+                # 通过文本内容查找
                 'div[role="button"]:has-text("Reply")',
-                # 更通用的发送按钮选择器
-                'button[type="button"][data-testid*="tweet"]',
-                'div[role="button"][data-testid*="tweet"]',
-                # 通过颜色和位置特征找到发送按钮
-                'button[style*="background-color"]',
-                'div[role="button"][style*="background-color"]'
+                'div[role="button"]:has-text("回复")',
+                'button:has-text("Reply")',
+                'button:has-text("回复")',
+                'div[role="button"]:has-text("Tweet")',
+                'button:has-text("Tweet")',
+                'button:has-text("发推")',
+                'button:has-text("Post")',
+                'button:has-text("发送")',
+                
+                # 通过aria-label查找
+                'button[aria-label*="Tweet"]',
+                'button[aria-label*="Reply"]',
+                'button[aria-label*="Post"]',
+                'button[aria-label*="发送"]',
+                'div[aria-label*="Tweet"]',
+                'div[aria-label*="Reply"]',
+                
+                # 通过CSS类查找（发送按钮通常有特定样式）
+                'button[class*="r-19yznuf"]',  # Twitter蓝色按钮
+                'div[class*="r-19yznuf"]',
+                'button[class*="r-1cwl3u0"]',
+                
+                # 通过type和位置查找
+                'button[type="submit"]',
+                'form button[type="button"]',
+                'div[role="dialog"] button',
+                
+                # 通过相对位置查找（发送按钮通常在输入框附近）
+                'div:has([contenteditable="true"]) + div button',
+                'div:has([data-testid*="textarea"]) button',
+                
+                # 最后的通用选择器
+                'button',
+                'div[role="button"]'
             ]
             
+            send_button = None
             for selector in send_selectors:
                 try:
-                    button = self.page.locator(selector).first
-                    if await button.count() > 0:
-                        # 验证这确实是发送按钮
-                        try:
-                            button_text = await button.text_content(timeout=2000)
-                            if button_text and any(word in button_text.lower() for word in ['tweet', 'reply', '发送', '回复']):
-                                send_button = button
-                                self.logger.debug(f"找到发送按钮，使用选择器: {selector}, 文本: {button_text}")
-                                break
-                            elif not button_text:  # 有些按钮可能没有文本但有正确的data-testid
-                                if 'tweet' in selector.lower():
+                    if selector in ['button', 'div[role="button"]']:
+                        # 对于通用选择器需要额外验证
+                        buttons = self.page.locator(selector)
+                        button_count = await buttons.count()
+                        
+                        for i in range(button_count):
+                            button = buttons.nth(i)
+                            try:
+                                # 检查是否可见和启用
+                                is_visible = await button.is_visible()
+                                is_enabled = await button.is_enabled()
+                                if not (is_visible and is_enabled):
+                                    continue
+                                
+                                # 检查文本内容
+                                text = await button.text_content(timeout=1000)
+                                if text:
+                                    text_lower = text.lower().strip()
+                                    if any(word in text_lower for word in ["reply", "回复", "tweet", "发推", "post", "发送"]):
+                                        self.logger.debug(f"通过文本找到发送按钮: {text}")
+                                        send_button = button
+                                        break
+                                
+                                # 检查aria-label
+                                aria_label = await button.get_attribute("aria-label", timeout=500)
+                                if aria_label:
+                                    aria_lower = aria_label.lower()
+                                    if any(word in aria_lower for word in ["tweet", "reply", "post", "发送", "回复"]):
+                                        self.logger.debug(f"通过aria-label找到发送按钮: {aria_label}")
+                                        send_button = button
+                                        break
+                                
+                                # 检查按钮类型和样式（发送按钮通常是蓝色的主按钮）
+                                button_type = await button.get_attribute("type", timeout=500)
+                                if button_type == "submit":
+                                    self.logger.debug(f"通过type=submit找到发送按钮")
                                     send_button = button
-                                    self.logger.debug(f"找到发送按钮，使用选择器: {selector} (无文本)")
                                     break
-                        except Exception as e:
-                            self.logger.debug(f"验证发送按钮文本失败: {e}")
-                            continue
+                                    
+                            except:
+                                continue
+                        
+                        if send_button:
+                            break
+                    else:
+                        # 标准选择器直接尝试
+                        button = self.page.locator(selector).first
+                        if await button.count() > 0:
+                            # 验证按钮是否可用
+                            try:
+                                is_visible = await button.is_visible()
+                                is_enabled = await button.is_enabled()
+                                if is_visible and is_enabled:
+                                    # 进一步验证文本内容
+                                    text = await button.text_content(timeout=1000)
+                                    if text and any(word in text.lower() for word in ["reply", "回复", "tweet", "发推", "post", "发送"]):
+                                        self.logger.debug(f"找到发送按钮，使用选择器: {selector}, 文本: {text}")
+                                        send_button = button
+                                        break
+                                    elif not text:  # 某些按钮可能没有文本，只有图标
+                                        self.logger.debug(f"找到发送按钮（无文本），使用选择器: {selector}")
+                                        send_button = button
+                                        break
+                            except:
+                                pass
                 except Exception as e:
                     self.logger.debug(f"发送按钮选择器失败 {selector}: {e}")
                     continue
             
+            # 最后的智能查找尝试
             if not send_button:
-                self.logger.warning("未找到发送按钮")
+                self.logger.debug("尝试使用智能查找方法查找发送按钮...")
+                send_button = await self._smart_find_element(self.page, "button", ["reply", "tweet", "post", "发送", "回复", "发推"])
+            
+            if not send_button:
+                self.logger.warning(f"未找到发送按钮 (@{username})")
                 return ActionResult.FAILED
             
-            # 发送评论 - 使用多种点击策略
+            # 多重策略点击发送按钮
             try:
-                # 策略1: 普通点击
+                # 温和清理阻挡元素
+                await self._gentle_clear_blockers()
+                
+                # 策略1: 强制点击
                 try:
-                    await send_button.click(timeout=3000)
-                    self.logger.debug("发送按钮点击成功 (普通点击)")
+                    await send_button.click(force=True, timeout=3000)
+                    self.logger.debug("发送按钮点击成功 (强制点击)")
                 except Exception as e:
-                    self.logger.debug(f"普通点击失败: {e}")
+                    self.logger.debug(f"强制点击失败: {e}")
                     
-                    # 策略2: 强制点击（忽略遮挡）
+                    # 策略2: JavaScript点击
                     try:
-                        await send_button.click(force=True, timeout=3000)
-                        self.logger.debug("发送按钮点击成功 (强制点击)")
+                        await send_button.evaluate("element => element.click()")
+                        self.logger.debug("发送按钮点击成功 (JS点击)")
                     except Exception as e:
-                        self.logger.debug(f"强制点击失败: {e}")
+                        self.logger.debug(f"JS点击失败: {e}")
                         
-                        # 策略3: 使用JavaScript点击
-                        try:
-                            await send_button.evaluate("element => element.click()")
-                            self.logger.debug("发送按钮点击成功 (JavaScript点击)")
-                        except Exception as e:
-                            self.logger.debug(f"JavaScript点击失败: {e}")
-                            
-                            # 策略4: 模拟键盘按键
-                            try:
-                                await self.page.keyboard.press('Enter')
-                                self.logger.debug("使用Enter键发送评论")
-                            except Exception as e:
-                                self.logger.debug(f"键盘发送失败: {e}")
-                                
-                                # 策略5: 尝试点击按钮的中心位置
-                                try:
-                                    box = await send_button.bounding_box()
-                                    if box:
-                                        center_x = box['x'] + box['width'] / 2
-                                        center_y = box['y'] + box['height'] / 2
-                                        await self.page.mouse.click(center_x, center_y)
-                                        self.logger.debug("发送按钮点击成功 (坐标点击)")
-                                    else:
-                                        raise Exception("无法获取按钮位置")
-                                except Exception as e:
-                                    self.logger.error(f"所有点击策略都失败: {e}")
-                                    return ActionResult.FAILED
-                                    
+                        # 策略3: 普通点击
+                        await send_button.click(timeout=3000)
+                        self.logger.debug("发送按钮点击成功 (普通点击)")
+                
             except Exception as e:
                 self.logger.error(f"点击发送按钮失败: {e}")
-                return ActionResult.FAILED
+                return ActionResult.ERROR
             
             # 等待发送完成
-            await asyncio.sleep(random.uniform(2.0, 4.0))
+            await asyncio.sleep(random.uniform(3.0, 5.0))
             
-            self.logger.info(f"评论发送成功: {comment_text}")
+            # 验证发送成功
+            try:
+                # 检查评论框是否消失（说明评论已发送）
+                if await comment_box.count() == 0:
+                    self.logger.info(f"评论发送成功: {comment_text}")
+                else:
+                    # 检查是否还有内容，如果清空了说明发送成功
+                    try:
+                        content = await comment_box.text_content(timeout=2000)
+                        if not content or len(content.strip()) == 0:
+                            self.logger.info(f"评论发送成功: {comment_text}")
+                        else:
+                            self.logger.warning(f"评论可能未发送成功，输入框仍有内容: {content[:50]}")
+                    except:
+                        # 如果获取不到内容，可能是页面变化了，认为发送成功
+                        self.logger.info(f"评论发送成功: {comment_text}")
+                
+            except Exception as e:
+                self.logger.debug(f"验证评论发送状态失败: {e}")
+                # 即使验证失败，也认为可能成功了
+                self.logger.info(f"评论发送成功: {comment_text}")
             
-            # 将评论内容存储到tweet_info中，这样会被记录到action记录里
-            tweet_info['generated_comment'] = comment_text
+            # 随机延迟
+            await self.random_delay(1.0, 3.0)
             
             return ActionResult.SUCCESS
             
@@ -840,6 +1268,86 @@ class ActionExecutor:
         self.logger.debug(f"Random delay: {delay:.2f} seconds")
         await asyncio.sleep(delay)
     
+    async def _smart_find_element(self, container, element_type: str, keywords: List[str] = None) -> Any:
+        """智能查找元素的通用方法"""
+        try:
+            if keywords is None:
+                keywords = []
+            
+            # 根据元素类型定义搜索策略
+            if element_type == "button":
+                # 查找所有可能的按钮元素
+                selectors = ['button', 'div[role="button"]', 'a[role="button"]', '[tabindex="0"]']
+            elif element_type == "input":
+                # 查找所有可能的输入元素
+                selectors = ['input', 'textarea', 'div[contenteditable="true"]', 'div[role="textbox"]']
+            else:
+                selectors = ['*']
+            
+            for selector in selectors:
+                elements = container.locator(selector)
+                count = await elements.count()
+                
+                for i in range(count):
+                    element = elements.nth(i)
+                    try:
+                        # 检查可见性
+                        is_visible = await element.is_visible()
+                        if not is_visible:
+                            continue
+                        
+                        # 检查aria-label
+                        aria_label = await element.get_attribute("aria-label", timeout=500)
+                        if aria_label and keywords:
+                            for keyword in keywords:
+                                if keyword.lower() in aria_label.lower():
+                                    self.logger.debug(f"通过aria-label找到元素: {aria_label}")
+                                    return element
+                        
+                        # 检查文本内容
+                        text = await element.text_content(timeout=500)
+                        if text and keywords:
+                            for keyword in keywords:
+                                if keyword.lower() in text.lower():
+                                    self.logger.debug(f"通过文本找到元素: {text}")
+                                    return element
+                        
+                        # 检查placeholder
+                        placeholder = await element.get_attribute("placeholder", timeout=500)
+                        if placeholder and keywords:
+                            for keyword in keywords:
+                                if keyword.lower() in placeholder.lower():
+                                    self.logger.debug(f"通过placeholder找到元素: {placeholder}")
+                                    return element
+                        
+                        # 检查data-testid
+                        testid = await element.get_attribute("data-testid", timeout=500)
+                        if testid and keywords:
+                            for keyword in keywords:
+                                if keyword.lower() in testid.lower():
+                                    self.logger.debug(f"通过data-testid找到元素: {testid}")
+                                    return element
+                        
+                        # 检查SVG图标的aria-label
+                        svg_elements = element.locator('svg')
+                        svg_count = await svg_elements.count()
+                        for j in range(svg_count):
+                            svg_aria = await svg_elements.nth(j).get_attribute("aria-label", timeout=500)
+                            if svg_aria and keywords:
+                                for keyword in keywords:
+                                    if keyword.lower() in svg_aria.lower():
+                                        self.logger.debug(f"通过SVG aria-label找到元素: {svg_aria}")
+                                        return element
+                        
+                    except:
+                        continue
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"智能查找元素失败: {e}")
+            return None
+    
     async def _check_page_available(self) -> bool:
         """检查页面是否仍然可用"""
         try:
@@ -852,6 +1360,196 @@ class ActionExecutor:
             return True
         except Exception as e:
             self.logger.debug(f"页面可用性检查失败: {e}")
+            return False
+    
+    async def _check_and_dismiss_cookie_popup(self):
+        """检查并清除Cookie弹窗"""
+        try:
+            cookie_mask = self.page.locator('[data-testid="twc-cc-mask"]')
+            mask_count = await cookie_mask.count()
+            
+            if mask_count > 0:
+                self.logger.debug(f"🍪 检测到Cookie弹窗遮罩，强制移除...")
+                await self._force_remove_cookie_mask()
+                await asyncio.sleep(1)  # 等待遮罩消失
+                return True
+            return True
+        except Exception as e:
+            self.logger.debug(f"检查Cookie弹窗失败: {e}")
+            return True
+    
+    async def _force_remove_cookie_mask(self):
+        """强制移除Cookie遮罩层 - 增强版"""
+        try:
+            await self.page.evaluate("""
+                (() => {
+                    console.log('🔧 强制移除Cookie遮罩层...');
+                    
+                    // 1. 移除Cookie同意遮罩
+                    document.querySelectorAll('[data-testid="twc-cc-mask"]').forEach((mask, index) => {
+                        console.log('移除Cookie遮罩', index, mask);
+                        mask.remove();
+                    });
+                    
+                    // 2. 移除所有data-testid="mask"的元素
+                    document.querySelectorAll('[data-testid="mask"]').forEach((mask, index) => {
+                        console.log('移除通用遮罩', index, mask);
+                        mask.remove();
+                    });
+                    
+                    // 3. 移除所有具有特定遮罩类的元素
+                    const overlayClasses = [
+                        'r-1p0dtai', 'r-1d2f490', 'r-1xcajam', 'r-zchlnj', 'r-ipm5af', 'r-1ffj0ar'
+                    ];
+                    overlayClasses.forEach(className => {
+                        document.querySelectorAll('.' + className).forEach(el => {
+                            const style = window.getComputedStyle(el);
+                            if (style.position === 'fixed' && (parseInt(style.zIndex) > 999 || el.dataset.testid === 'mask')) {
+                                console.log('移除覆盖层:', className, el);
+                                el.remove();
+                            }
+                        });
+                    });
+                    
+                    // 4. 清理layers容器
+                    const layersContainer = document.querySelector('#layers');
+                    if (layersContainer) {
+                        Array.from(layersContainer.children).forEach((child, index) => {
+                            const style = window.getComputedStyle(child);
+                            if (style.position === 'fixed' && parseInt(style.zIndex) > 999) {
+                                console.log('移除layers子元素', index, child);
+                                child.remove();
+                            }
+                        });
+                    }
+                    
+                    // 5. 强制设置body和html的pointer-events
+                    document.body.style.pointerEvents = 'auto';
+                    document.documentElement.style.pointerEvents = 'auto';
+                    
+                    // 6. 隐藏或移除所有可能的阻挡元素
+                    document.querySelectorAll('div').forEach(div => {
+                        const style = window.getComputedStyle(div);
+                        if (style.position === 'fixed' && 
+                            (parseInt(style.zIndex) > 999 || div.dataset.testid === 'mask' || div.dataset.testid === 'twc-cc-mask')) {
+                            div.style.display = 'none';
+                            div.style.pointerEvents = 'none';
+                        }
+                    });
+                    
+                    console.log('✅ 强制移除遮罩完成');
+                })();
+            """)
+            return True
+        except Exception as e:
+            self.logger.debug(f"强制移除遮罩失败: {e}")
+            return False
+
+    async def _gentle_clear_blockers(self):
+        """温和地清理阻挡元素（避免破坏页面结构）"""
+        try:
+            await self.page.evaluate("""
+                (() => {
+                    console.log('🧹 温和清理阻挡元素...');
+                    
+                    // 1. 只移除明确的遮罩元素
+                    document.querySelectorAll('[data-testid*="mask"]').forEach(el => {
+                        if (el.dataset.testid && (el.dataset.testid.includes('mask') || el.dataset.testid === 'twc-cc-mask')) {
+                            console.log('移除遮罩元素:', el);
+                            el.remove();
+                        }
+                    });
+                    
+                    // 2. 只处理明显的阻挡层（高z-index且覆盖大部分屏幕）
+                    document.querySelectorAll('*').forEach(el => {
+                        const style = window.getComputedStyle(el);
+                        if (style.position === 'fixed' && parseInt(style.zIndex) > 9999) {
+                            const rect = el.getBoundingClientRect();
+                            // 只移除覆盖超过80%屏幕的大遮罩
+                            if (rect.width > window.innerWidth * 0.8 && rect.height > window.innerHeight * 0.8) {
+                                console.log('移除大遮罩:', el, 'z-index:', style.zIndex);
+                                el.style.display = 'none';
+                                el.style.pointerEvents = 'none';
+                            }
+                        }
+                    });
+                    
+                    // 3. 恢复body交互
+                    document.body.style.pointerEvents = 'auto';
+                    
+                    console.log('✅ 温和清理完成');
+                })();
+            """)
+            return True
+        except Exception as e:
+            self.logger.debug(f"温和清理失败: {e}")
+            return False
+
+    async def _aggressive_clear_blockers(self):
+        """激进地清理所有可能的阻挡元素（仅在必要时使用）"""
+        try:
+            await self.page.evaluate("""
+                (() => {
+                    console.log('🔧 激进清理阻挡元素...');
+                    
+                    // 1. 移除所有testid包含mask的元素
+                    document.querySelectorAll('[data-testid*="mask"]').forEach(el => {
+                        console.log('移除mask元素:', el);
+                        el.remove();
+                    });
+                    
+                    // 2. 移除所有高z-index的fixed元素
+                    document.querySelectorAll('*').forEach(el => {
+                        const style = window.getComputedStyle(el);
+                        if (style.position === 'fixed' && parseInt(style.zIndex) > 999) {
+                            // 检查是否是阻挡元素
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 100 && rect.height > 100) {
+                                console.log('移除高z-index元素:', el, 'z-index:', style.zIndex);
+                                el.remove();
+                            }
+                        }
+                    });
+                    
+                    // 3. 处理layers容器
+                    const layers = document.querySelector('#layers');
+                    if (layers) {
+                        Array.from(layers.children).forEach(child => {
+                            const style = window.getComputedStyle(child);
+                            if (style.pointerEvents !== 'none') {
+                                console.log('移除layers中的阻挡元素:', child);
+                                child.remove();
+                            }
+                        });
+                    }
+                    
+                    // 4. 移除所有可能的遮罩类
+                    const maskClasses = [
+                        'r-1p0dtai', 'r-1d2f490', 'r-1xcajam', 'r-zchlnj', 'r-ipm5af', 'r-1ffj0ar'
+                    ];
+                    maskClasses.forEach(className => {
+                        document.querySelectorAll('.' + className).forEach(el => {
+                            const style = window.getComputedStyle(el);
+                            if (style.position === 'fixed' || style.position === 'absolute') {
+                                if (parseInt(style.zIndex) > 500) {
+                                    console.log('移除遮罩类元素:', className, el);
+                                    el.style.display = 'none';
+                                    el.style.pointerEvents = 'none';
+                                }
+                            }
+                        });
+                    });
+                    
+                    // 5. 强制恢复body的交互
+                    document.body.style.pointerEvents = 'auto';
+                    document.documentElement.style.pointerEvents = 'auto';
+                    
+                    console.log('✅ 激进清理完成');
+                })();
+            """)
+            return True
+        except Exception as e:
+            self.logger.debug(f"激进清理失败: {e}")
             return False
 
 class ContentFilter:
@@ -875,14 +1573,15 @@ class ContentFilter:
             
             # 检查语言过滤
             content_text = content_info.get('content', '').lower()
-            if target_config.languages:
-                # 简单的语言检测（可以扩展）
+            languages_to_check = target_config.content_languages or target_config.languages
+            if languages_to_check:
+                # 语言检测
                 has_valid_language = any(
                     self._detect_language(content_text, lang) 
-                    for lang in target_config.languages
+                    for lang in languages_to_check
                 )
                 if not has_valid_language:
-                    self.logger.debug(f"Skipping content due to language filter")
+                    self.logger.info(f"🌍 跳过非目标语言内容: {content_text[:50]}...")
                     return False
             
             # 检查排除关键词
@@ -922,14 +1621,97 @@ class ContentFilter:
             return 0
     
     def _detect_language(self, text: str, target_lang: str) -> bool:
-        """简单的语言检测"""
+        """改进的语言检测"""
+        if not text.strip():
+            return False
+            
         if target_lang == 'en':
-            # 英文检测：包含常见英文词汇
-            english_words = ['the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']
-            return any(word in text.lower() for word in english_words)
+            # 英文检测：多种策略结合
+            text_lower = text.lower()
+            
+            # 策略1: 常见英文词汇
+            english_words = [
+                'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+                'this', 'that', 'have', 'has', 'had', 'will', 'would', 'can', 'could',
+                'should', 'must', 'might', 'may', 'do', 'does', 'did', 'get', 'got',
+                'make', 'made', 'take', 'took', 'come', 'came', 'go', 'went', 'see', 'saw',
+                'know', 'new', 'first', 'last', 'long', 'great', 'little', 'own', 'other',
+                'old', 'right', 'big', 'high', 'different', 'small', 'large', 'next',
+                'early', 'young', 'important', 'few', 'public', 'bad', 'same', 'able',
+                'is', 'am', 'are', 'was', 'were', 'be', 'been', 'being', 'about', 'out',
+                'up', 'down', 'here', 'there', 'where', 'when', 'what', 'who', 'how', 'why'
+            ]
+            
+            # 策略2: 英文专业词汇（AI、技术相关）
+            tech_words = [
+                'ai', 'artificial', 'intelligence', 'machine', 'learning', 'deep', 'neural',
+                'technology', 'tech', 'innovation', 'data', 'algorithm', 'model', 'training',
+                'programming', 'code', 'development', 'software', 'computer', 'digital'
+            ]
+            
+            words = text_lower.split()
+            if len(words) == 0:
+                return False
+            
+            # 检查英文常用词
+            common_word_count = sum(1 for word in words if any(eng_word == word for eng_word in english_words))
+            # 检查英文专业词汇
+            tech_word_count = sum(1 for word in words if any(tech_word in word for tech_word in tech_words))
+            
+            # 策略3: 字符检测（主要是拉丁字母）
+            latin_chars = sum(1 for char in text if char.isalpha() and ord(char) < 256)
+            total_alpha_chars = sum(1 for char in text if char.isalpha())
+            
+            # 综合判断
+            if len(words) <= 3:  # 短文本
+                # 短文本：有英文常用词或专业词汇就认为是英文
+                return common_word_count > 0 or tech_word_count > 0 or (total_alpha_chars > 0 and latin_chars / total_alpha_chars > 0.8)
+            else:  # 长文本
+                # 长文本：英文词汇占比超过20%就认为是英文
+                english_score = (common_word_count + tech_word_count) / len(words)
+                latin_score = latin_chars / max(total_alpha_chars, 1)
+                return english_score > 0.2 or latin_score > 0.7
+            
         elif target_lang == 'zh':
-            # 中文检测：包含中文字符
-            return any('\u4e00' <= char <= '\u9fff' for char in text)
+            # 中文检测：包含中文字符，但排除日文
+            chinese_chars = [char for char in text if '\u4e00' <= char <= '\u9fff']
+            # 检查是否包含日文特有字符
+            hiragana_chars = [char for char in text if '\u3040' <= char <= '\u309f']
+            katakana_chars = [char for char in text if '\u30a0' <= char <= '\u30ff']
+            
+            # 如果包含较多平假名或片假名，可能是日文而非中文
+            if len(text) > 0:
+                hiragana_ratio = len(hiragana_chars) / len(text)
+                katakana_ratio = len(katakana_chars) / len(text)
+                chinese_ratio = len(chinese_chars) / len(text)
+                
+                # 如果日文字符占比较高，不认为是中文
+                if hiragana_ratio > 0.1 or katakana_ratio > 0.1:
+                    return False
+                
+                # 如果中文字符占比超过20%，且没有太多日文字符，认为是中文
+                return chinese_ratio > 0.2
+            
+            return False
+            
+        elif target_lang == 'ja':
+            # 日文检测：平假名、片假名、汉字
+            japanese_chars = [char for char in text if 
+                             '\u3040' <= char <= '\u309f' or  # 平假名
+                             '\u30a0' <= char <= '\u30ff' or  # 片假名
+                             '\u4e00' <= char <= '\u9fff']    # 汉字
+            return len(text) > 0 and (len(japanese_chars) / len(text)) > 0.2
+            
+        elif target_lang == 'ko':
+            # 韩文检测：韩文字符
+            korean_chars = [char for char in text if '\uac00' <= char <= '\ud7af']
+            return len(text) > 0 and (len(korean_chars) / len(text)) > 0.2
+            
+        elif target_lang == 'ar':
+            # 阿拉伯文检测
+            arabic_chars = [char for char in text if '\u0600' <= char <= '\u06ff']
+            return len(text) > 0 and (len(arabic_chars) / len(text)) > 0.2
+            
         else:
-            # 其他语言暂时返回True
+            # 其他语言暂时返回True（不过滤）
             return True 

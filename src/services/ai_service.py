@@ -103,7 +103,7 @@ class AIService:
     → 只用中文撰写
 
 6.  **纯净输出**：
-    → 仅返回评论正文，无需格式、标号或解释说明
+    → 仅返回评论正文，不需要带话题tag-#xxx，无需格式、标号或解释说明
             """
             
             user_prompt = f"推文内容: {content}"
@@ -118,7 +118,7 @@ You are a friendly, social-media-savvy assistant that helps users craft authenti
 3.  **Be Concise & Engaging:** Aim for brevity (typically under 100 characters for readability, but prioritize naturalness over strict limits). Focus on impact.
 4.  **Use Emojis Tastefully:** Include 1-2 relevant emojis *only* if they genuinely enhance warmth or emotion. Don't force them.
 5.  **Stay Safe & Sincere:** Be positive or neutral. Avoid anything controversial, political, promotional, or insincere. Write exclusively in English.
-6.  **Output Only:** Provide **only** the reply comment text itself, with no additional explanation or formatting.
+6.  **Output Only:** Provide **only** the reply comment text itself, you don't need to include the hashtag #xxx., with no additional explanation or formatting.
             """
             
             user_prompt = f"""Tweet author: @{username} {'(verified)' if is_verified else ''}

@@ -12,18 +12,21 @@ from datetime import datetime, timedelta
 class AccountConfig:
     """账号配置"""
     account_id: str                    # 账号ID（唯一标识）
-    username: str                      # Twitter用户名
-    display_name: str                  # 显示名称
-    email: str                         # 邮箱
-    password: str                      # 密码
-    cookies_file: str                  # cookies文件路径
+    username: str = ""                 # Twitter用户名  
+    display_name: str = ""             # 显示名称
+    email: str = ""                    # 邮箱
+    cookies_file: str = ""             # cookies文件路径
     
     # 状态信息
     is_active: bool = True            # 是否激活
     last_used: Optional[str] = None   # 最后使用时间
-    cooldown_until: Optional[str] = None  # 冷却结束时间
     usage_count: int = 0              # 使用次数
     notes: str = ""                   # 备注
+    
+    def __post_init__(self):
+        """初始化后处理"""
+        if not self.cookies_file:
+            self.cookies_file = f"data/cookies/cookies_{self.account_id}.json"
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -32,25 +35,17 @@ class AccountConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'AccountConfig':
         """从字典创建实例"""
-        return cls(**data)
+        # 兼容旧格式，忽略不需要的字段
+        valid_fields = {
+            'account_id', 'username', 'display_name', 'email', 'cookies_file',
+            'is_active', 'last_used', 'usage_count', 'notes'
+        }
+        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**filtered_data)
     
     def is_available(self) -> bool:
         """检查账号是否可用"""
-        if not self.is_active:
-            return False
-        
-        # 检查冷却时间
-        if self.cooldown_until:
-            cooldown_time = datetime.fromisoformat(self.cooldown_until)
-            if datetime.now() < cooldown_time:
-                return False
-        
-        return True
-    
-    def set_cooldown(self, hours: int = 2):
-        """设置冷却时间"""
-        cooldown_time = datetime.now() + timedelta(hours=hours)
-        self.cooldown_until = cooldown_time.isoformat()
+        return self.is_active
     
     def update_usage(self):
         """更新使用信息"""
@@ -108,38 +103,22 @@ class AccountManager:
         except Exception as e:
             self.logger.error(f"保存账号配置失败: {e}")
     
-    def add_account(self, account: AccountConfig) -> bool:
-        """添加账号"""
-        try:
-            if account.account_id in self.accounts:
-                self.logger.warning(f"账号 {account.account_id} 已存在，将覆盖")
-            
-            self.accounts[account.account_id] = account
-            self.save_accounts()
-            
-            self.logger.info(f"添加账号成功: {account.account_id} (@{account.username})")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"添加账号失败: {e}")
-            return False
-    
-    def remove_account(self, account_id: str) -> bool:
-        """删除账号"""
-        try:
-            if account_id in self.accounts:
-                account = self.accounts.pop(account_id)
-                self.save_accounts()
-                
-                self.logger.info(f"删除账号成功: {account_id} (@{account.username})")
-                return True
-            else:
-                self.logger.warning(f"账号 {account_id} 不存在")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"删除账号失败: {e}")
-            return False
+    def add_or_update_account(self, account_id: str, **kwargs) -> AccountConfig:
+        """添加或更新账号"""
+        if account_id in self.accounts:
+            # 更新现有账号
+            account = self.accounts[account_id]
+            for key, value in kwargs.items():
+                if hasattr(account, key) and value:
+                    setattr(account, key, value)
+        else:
+            # 创建新账号
+            account = AccountConfig(account_id=account_id, **kwargs)
+            self.accounts[account_id] = account
+        
+        self.save_accounts()
+        self.logger.info(f"账号 {account_id} 信息已更新")
+        return account
     
     def get_account(self, account_id: str) -> Optional[AccountConfig]:
         """获取账号配置"""
@@ -153,61 +132,23 @@ class AccountManager:
         """获取可用账号列表"""
         return [account for account in self.accounts.values() if account.is_available()]
     
-    def get_next_account(self, exclude_ids: List[str] = None) -> Optional[AccountConfig]:
-        """获取下一个可用账号"""
-        exclude_ids = exclude_ids or []
-        
-        available_accounts = [
-            account for account in self.get_available_accounts()
-            if account.account_id not in exclude_ids
-        ]
-        
-        if not available_accounts:
-            return None
-        
-        # 按最后使用时间排序，优先使用最久未使用的账号
-        available_accounts.sort(key=lambda x: x.last_used or "1900-01-01")
-        
-        return available_accounts[0]
-    
-    def update_account_usage(self, account_id: str, set_cooldown: bool = True):
+    def update_account_usage(self, account_id: str):
         """更新账号使用信息"""
         account = self.get_account(account_id)
         if account:
             account.update_usage()
-            if set_cooldown:
-                account.set_cooldown()
             self.save_accounts()
-    
-    def set_account_status(self, account_id: str, is_active: bool):
-        """设置账号状态"""
-        account = self.get_account(account_id)
-        if account:
-            account.is_active = is_active
-            self.save_accounts()
-            
-            status = "激活" if is_active else "禁用"
-            self.logger.info(f"账号 {account_id} 已{status}")
-    
-    def clear_cooldowns(self):
-        """清除所有账号的冷却时间"""
-        for account in self.accounts.values():
-            account.cooldown_until = None
-        self.save_accounts()
-        self.logger.info("已清除所有账号的冷却时间")
     
     def get_account_stats(self) -> Dict[str, Any]:
         """获取账号统计信息"""
         total = len(self.accounts)
         active = len([a for a in self.accounts.values() if a.is_active])
         available = len(self.get_available_accounts())
-        in_cooldown = len([a for a in self.accounts.values() if a.cooldown_until])
         
         return {
             "total": total,
             "active": active,
-            "available": available,
-            "in_cooldown": in_cooldown
+            "available": available
         }
 
 # 全局账号管理器实例

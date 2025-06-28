@@ -31,36 +31,20 @@ class BrowserManager:
             # 确保用户数据目录存在
             self.user_data_dir.mkdir(parents=True, exist_ok=True)
             
+            # 清理残留的锁文件
+            self._cleanup_browser_files()
+            
             # 获取随机User-Agent
             user_agent = self._get_random_user_agent()
             
-            # 配置浏览器启动参数 - 增强反检测
+            # 配置浏览器启动参数 - 最小化反检测
             args = [
                 '--no-sandbox',
-                '--disable-blink-features=AutomationControlled',  # 隐藏自动化控制标识
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-extensions-file-access-check',
-                '--disable-extensions-http-throttling',
-                '--disable-ipc-flooding-protection',
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-                '--disable-field-trial-config',
-                '--disable-back-forward-cache',
-                '--disable-component-extensions-with-background-pages',
-                '--enable-features=NetworkService,NetworkServiceInProcess',
-                '--force-color-profile=srgb',
-                '--metrics-recording-only',
                 '--no-first-run',
                 '--no-default-browser-check',
-                '--no-pings',
                 '--password-store=basic',
                 '--use-mock-keychain',
-                '--hide-scrollbars',
-                '--mute-audio',
+                '--start-maximized',
                 f'--window-size={width},{height}',
                 f'--user-agent={user_agent}'
             ]
@@ -69,8 +53,6 @@ class BrowserManager:
             if headless:
                 args.extend([
                     '--headless=new',  # 使用新的headless模式
-                    '--disable-gpu-sandbox',
-                    '--disable-software-rasterizer'
                 ])
             
             self.context = await self.playwright.chromium.launch_persistent_context(
@@ -78,16 +60,9 @@ class BrowserManager:
                 headless=headless,
                 args=args,
                 viewport={'width': width, 'height': height},
-                ignore_https_errors=True,
-                java_script_enabled=True,
-                accept_downloads=True,
-                bypass_csp=True,
                 user_agent=user_agent,
-                # 模拟真实浏览器环境
                 locale='en-US',
-                timezone_id='America/New_York',
-                geolocation={'latitude': 40.7128, 'longitude': -74.0060},  # 纽约坐标
-                permissions=['geolocation']
+                timezone_id='America/New_York'
             )
             
             # 创建新页面
@@ -96,144 +71,99 @@ class BrowserManager:
             # 设置页面配置
             await self.page.set_viewport_size({'width': width, 'height': height})
             
-            # 增强的反检测脚本
+            # 基本的反检测脚本
             await self.page.add_init_script("""
                 // 隐藏webdriver属性
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined,
                 });
-                
-                // 移除automation标识
-                delete window.chrome?.runtime?.onConnect;
-                
-                // 模拟真实的chrome对象
-                window.chrome = {
-                    runtime: {
-                        onConnect: undefined,
-                        onMessage: undefined,
-                    },
-                    app: {
-                        isInstalled: false,
-                    },
-                    webstore: {
-                        onInstallStageChanged: {},
-                        onDownloadProgress: {},
-                    },
-                    csi: function() {},
-                    loadTimes: function() {
-                        return {
-                            requestTime: Date.now() / 1000,
-                            startLoadTime: Date.now() / 1000,
-                            commitLoadTime: Date.now() / 1000,
-                            finishDocumentLoadTime: Date.now() / 1000,
-                            finishLoadTime: Date.now() / 1000,
-                            firstPaintTime: Date.now() / 1000,
-                            firstPaintAfterLoadTime: Date.now() / 1000,
-                            navigationType: 'Other',
-                            wasFetchedViaSpdy: false,
-                            wasNpnNegotiated: false,
-                            npnNegotiatedProtocol: 'unknown',
-                            wasAlternateProtocolAvailable: false,
-                            connectionInfo: 'unknown'
-                        };
-                    }
-                };
-                
-                // 修复plugins长度
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => {
-                        return Array.from({length: 5}, (_, i) => ({
-                            name: `Plugin ${i}`,
-                            filename: `plugin${i}.dll`,
-                            description: `Plugin ${i} Description`
-                        }));
-                    },
-                });
-                
-                // 隐藏自动化痕迹
-                const originalQuery = window.document.querySelector;
-                window.document.querySelector = function(selector) {
-                    if (selector === 'meta[name="webdriver"]') {
-                        return null;
-                    }
-                    return originalQuery.call(document, selector);
-                };
-                
-                // 模拟真实的语言设置
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en'],
-                });
-                
-                // 模拟真实的hardwareConcurrency
-                Object.defineProperty(navigator, 'hardwareConcurrency', {
-                    get: () => 8,
-                });
-                
-                // 模拟真实的deviceMemory
-                Object.defineProperty(navigator, 'deviceMemory', {
-                    get: () => 8,
-                });
-                
-                // 隐藏Permission API的自动化特征
-                const originalQuery2 = window.navigator.permissions.query;
-                window.navigator.permissions.query = function(parameters) {
-                    return originalQuery2.call(navigator.permissions, parameters);
-                };
-                
-                // 模拟真实的连接信息
-                Object.defineProperty(navigator, 'connection', {
-                    get: () => ({
-                        effectiveType: '4g',
-                        rtt: 100,
-                        downlink: 10,
-                        saveData: false
-                    }),
-                });
             """)
             
-            # 设置额外的请求头，模拟真实浏览器
-            await self.page.set_extra_http_headers({
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cache-Control': 'max-age=0',
-                'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Upgrade-Insecure-Requests': '1'
-            })
+
             
             self.logger.info("Browser started successfully with enhanced stealth mode")
             
             # 添加Cookie弹窗处理器
             await self._setup_cookie_handler()
             
+            return True
+            
         except Exception as e:
             self.logger.error(f"Failed to start browser: {e}")
-            raise
+            return False
     
     async def close(self):
         """关闭浏览器"""
         try:
             if self.context:
                 # 保存cookies
-                await self._save_cookies()
-                await self.context.close()
+                try:
+                    await self._save_cookies()
+                except Exception as e:
+                    log.warning(f"保存cookies失败: {e}")
+                
+                try:
+                    await self.context.close()
+                except Exception as e:
+                    log.warning(f"关闭浏览器上下文失败: {e}")
             
             if self.browser:
-                await self.browser.close()
+                try:
+                    await self.browser.close()
+                except Exception as e:
+                    log.warning(f"关闭浏览器失败: {e}")
             
             if self.playwright:
-                await self.playwright.stop()
+                try:
+                    await self.playwright.stop()
+                except Exception as e:
+                    log.warning(f"停止playwright失败: {e}")
+            
+            # 清理锁文件
+            self._cleanup_browser_files()
                 
             log.info("浏览器已关闭")
             
         except Exception as e:
             log.error(f"关闭浏览器失败: {e}")
+    
+    def _cleanup_browser_files(self):
+        """清理浏览器相关文件"""
+        try:
+            import os
+            import shutil
+            from pathlib import Path
+            
+            # 清理SingletonLock文件
+            singleton_lock = self.user_data_dir / "SingletonLock"
+            if singleton_lock.exists():
+                try:
+                    singleton_lock.unlink()
+                    log.debug("已清理SingletonLock文件")
+                except Exception as e:
+                    log.debug(f"清理SingletonLock文件失败: {e}")
+            
+            # 清理其他临时文件
+            temp_files = [
+                "SingletonCookie",
+                "SingletonSocket",
+                ".com.google.Chrome.XXXXXX"
+            ]
+            
+            for temp_file in temp_files:
+                temp_path = self.user_data_dir / temp_file
+                if temp_path.exists():
+                    try:
+                        if temp_path.is_file():
+                            temp_path.unlink()
+                        elif temp_path.is_dir():
+                            shutil.rmtree(temp_path)
+                        log.debug(f"已清理临时文件: {temp_file}")
+                    except Exception as e:
+                        log.debug(f"清理临时文件失败 {temp_file}: {e}")
+                        
+        except Exception as e:
+            log.debug(f"清理浏览器文件失败: {e}")
     
     async def new_page(self) -> Page:
         """创建新页面"""

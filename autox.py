@@ -150,6 +150,14 @@ class AutoXSession:
         except Exception as e:
             self.logger.error(f"Error during task execution: {e}")
         finally:
+            # 更新账号使用信息（不设置冷却）
+            if self.account_config:
+                try:
+                    account_manager.update_account_usage(self.account_config.account_id)
+                    self.logger.info(f"Updated usage for account: {self.account_config.account_id}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to update account usage: {e}")
+            
             await self.close()
     
     async def _execute_configured_actions(self):
@@ -405,13 +413,42 @@ class AutoXSession:
             if self.search_keywords:
                 # 选择一个关键词进行搜索
                 keyword = random.choice(self.search_keywords)
-                target_url = f"https://x.com/search?q={keyword}"
-                self.logger.info(f"Using search results for keyword: {keyword}")
+                
+                # 根据is_live参数决定排序方式
+                if self.config.target.is_live:
+                    target_url = f"https://x.com/search?q={keyword}&f=live"
+                    self.logger.info(f"Using search results for keyword (最新): {keyword}")
+                else:
+                    target_url = f"https://x.com/search?q={keyword}"
+                    self.logger.info(f"Using search results for keyword (热门): {keyword}")
+            elif self.config.target.hashtags and len(self.config.target.hashtags) > 0:
+                # 使用配置的hashtag
+                hashtag = random.choice(self.config.target.hashtags)
+                # 确保hashtag以#开头
+                if not hashtag.startswith('#'):
+                    hashtag = f"#{hashtag}"
+                # URL编码hashtag
+                import urllib.parse
+                encoded_hashtag = urllib.parse.quote(hashtag)
+                
+                # 根据is_live参数决定排序方式
+                if self.config.target.is_live:
+                    target_url = f"https://x.com/search?q={encoded_hashtag}&src=hashtag_click&f=live"
+                    self.logger.info(f"Using hashtag search (最新): {hashtag}")
+                else:
+                    target_url = f"https://x.com/search?q={encoded_hashtag}&src=hashtag_click"
+                    self.logger.info(f"Using hashtag search (热门): {hashtag}")
             elif self.config.target.keywords and len(self.config.target.keywords) > 0:
                 # 使用配置的关键词
                 keyword = random.choice(self.config.target.keywords)
-                target_url = f"https://x.com/search?q={keyword}"
-                self.logger.info(f"Using configured keyword: {keyword}")
+                
+                # 根据is_live参数决定排序方式
+                if self.config.target.is_live:
+                    target_url = f"https://x.com/search?q={keyword}&f=live"
+                    self.logger.info(f"Using keyword search (最新): {keyword}")
+                else:
+                    target_url = f"https://x.com/search?q={keyword}"
+                    self.logger.info(f"Using keyword search (热门): {keyword}")
             else:
                 # 使用主页时间线
                 target_url = "https://x.com/home"
@@ -451,7 +488,12 @@ class AutoXSession:
             await self._handle_cookie_popup_manual()
             
             self.logger.info("✅ 内容源准备完成")
-            return "timeline"
+            
+            # 根据使用的源返回适当的类型
+            if "search" in target_url:
+                return "search"
+            else:
+                return "timeline"
             
         except Exception as e:
             self.logger.error(f"获取内容源失败: {e}")
@@ -645,6 +687,25 @@ class AutoXSession:
         except Exception as e:
             self.logger.error(f"强制移除遮罩失败: {e}")
             return False
+    
+    async def _check_and_dismiss_cookie_popup(self):
+        """在每次操作前检查并关闭Cookie弹窗"""
+        try:
+            cookie_mask = self.browser_manager.page.locator('[data-testid="twc-cc-mask"]')
+            mask_count = await cookie_mask.count()
+            
+            if mask_count > 0:
+                self.logger.debug(f"🍪 检测到Cookie弹窗遮罩，尝试关闭...")
+                success = await self._force_remove_cookie_mask()
+                if success:
+                    await asyncio.sleep(1)  # 等待遮罩消失
+                    return True
+                else:
+                    return False
+            return True
+        except Exception as e:
+            self.logger.debug(f"检查Cookie弹窗失败: {e}")
+            return True
     
     async def _get_content_items(self, source_type: str, action_type: ActionType) -> List[Dict[str, Any]]:
         """获取内容项"""
@@ -942,6 +1003,9 @@ class AutoXSession:
             if not element:
                 return ActionResult.ERROR
             
+            # 在执行动作前检查并清除Cookie弹窗
+            await self._check_and_dismiss_cookie_popup()
+            
             result = await self.action_executor.execute_action(action_config, element, item)
             
             if result == ActionResult.SUCCESS:
@@ -1038,7 +1102,7 @@ async def run_session(session_config: SessionConfig, search_keywords: Optional[L
     await session.start()
     await session.run_task()
 
-async def run_multi_account_session(session_config: SessionConfig, search_keywords: Optional[List[str]] = None, cooldown_hours: int = 2):
+async def run_multi_account_session(session_config: SessionConfig, search_keywords: Optional[List[str]] = None):
     """使用多账号运行会话"""
     print("🚀 多账号执行模式")
     
@@ -1047,7 +1111,7 @@ async def run_multi_account_session(session_config: SessionConfig, search_keywor
     
     if not available_accounts:
         print("❌ 没有可用的账号，请先添加账号")
-        print("使用命令: python manage_accounts.py")
+        print("使用命令: python get_cookies.py <account_id>")
         return
     
     print(f"📋 找到 {len(available_accounts)} 个可用账号")
@@ -1064,21 +1128,10 @@ async def run_multi_account_session(session_config: SessionConfig, search_keywor
             await session.start()
             await session.run_task()
             
-            # 更新账号使用状态
-            account_manager.update_account_usage(account.account_id, set_cooldown=True)
-            
             print(f"✅ 账号 {account.account_id} 执行完成")
             
         except Exception as e:
             print(f"❌ 账号 {account.account_id} 执行失败: {e}")
-            # 即使失败也设置冷却，避免频繁重试
-            account_manager.update_account_usage(account.account_id, set_cooldown=True)
-        
-        # 账号间隔时间（避免风控）
-        if i < len(available_accounts):
-            wait_minutes = random.randint(5, 15)  # 随机等待5-15分钟
-            print(f"⏰ 等待 {wait_minutes} 分钟后执行下一个账号...")
-            await asyncio.sleep(wait_minutes * 60)
     
     print("\n🎉 所有账号执行完成!")
     
@@ -1088,7 +1141,6 @@ async def run_multi_account_session(session_config: SessionConfig, search_keywor
     print(f"总账号数: {stats['total']}")
     print(f"活跃账号: {stats['active']}")
     print(f"可用账号: {stats['available']}")
-    print(f"冷却中账号: {stats['in_cooldown']}")
 
 def main():
     """主函数"""
@@ -1158,31 +1210,22 @@ def main():
         account = account_manager.get_account(args.account_id)
         if not account:
             print(f"❌ 账号 {args.account_id} 不存在")
-            print("使用 'python manage_accounts.py --list' 查看可用账号")
+            print("使用 'python get_cookies.py --list' 查看可用账号")
             return
         if not account.is_available():
-            print(f"❌ 账号 {args.account_id} 不可用（可能处于冷却期或被禁用）")
+            print(f"❌ 账号 {args.account_id} 不可用（可能被禁用）")
             return
         
         print(f"👤 指定账号模式: {account.account_id} (@{account.username})")
         
         async def run_with_account():
             session = AutoXSession(config, args.search, account)
-            task_started = False
             try:
                 await session.start()
-                task_started = True  # 标记任务已开始
                 await session.run_task()
-                # 更新账号使用状态 - 只有任务真正开始后才设置冷却
-                account_manager.update_account_usage(account.account_id, set_cooldown=True)
                 print(f"✅ 账号 {account.account_id} 执行完成")
             except Exception as e:
                 print(f"❌ 账号 {account.account_id} 执行失败: {e}")
-                # 只有在任务开始后失败才设置冷却，启动失败不设置冷却
-                if task_started:
-                    account_manager.update_account_usage(account.account_id, set_cooldown=True)
-                else:
-                    print(f"ℹ️ 账号 {account.account_id} 启动失败，不设置冷却")
         
         asyncio.run(run_with_account())
     else:
