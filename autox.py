@@ -393,17 +393,11 @@ class AutoXSession:
     async def _get_content_source(self):
         """获取内容源"""
         try:
-            # 检查页面是否仍然可用
-            if self.browser_manager.page.is_closed():
-                self.logger.error("页面已关闭，无法获取内容源")
-                raise Exception("页面已关闭")
-            
-            # 检查浏览器上下文是否仍然可用
-            try:
-                await self.browser_manager.page.title()
-            except Exception as e:
-                self.logger.error(f"页面不可用: {e}")
-                raise Exception(f"页面不可用: {e}")
+            # 检查并恢复页面状态
+            page_recovered = await self._check_and_recover_page_state()
+            if not page_recovered:
+                self.logger.error("无法恢复页面状态，任务终止")
+                raise Exception("无法恢复页面状态")
             
             current_url = self.browser_manager.page.url
             self.logger.info(f"当前页面URL: {current_url}")
@@ -498,6 +492,334 @@ class AutoXSession:
         except Exception as e:
             self.logger.error(f"获取内容源失败: {e}")
             raise
+
+    async def _check_and_recover_page_state(self) -> bool:
+        """检查并恢复页面状态"""
+        try:
+            self.logger.debug("检查页面状态...")
+            
+            # 第一层检查：页面是否关闭
+            if self.browser_manager.page.is_closed():
+                self.logger.error("页面已关闭，尝试重新创建...")
+                return await self._recreate_page()
+            
+            # 第二层检查：执行上下文是否可用
+            try:
+                title = await self.browser_manager.page.title()
+                current_url = self.browser_manager.page.url
+                self.logger.debug(f"页面状态正常 - 标题: {title}, URL: {current_url}")
+                
+                # 第三层检查：是否被重定向到登录页面
+                if await self._is_redirected_to_login():
+                    self.logger.warning("检测到被重定向到登录页面，尝试重新登录...")
+                    return await self._handle_login_redirect()
+                
+                # 第四层检查：是否在错误页面
+                if await self._is_error_page():
+                    self.logger.warning("检测到错误页面，尝试恢复...")
+                    return await self._recover_from_error_page()
+                
+                self.logger.debug("✅ 页面状态检查通过")
+                return True
+                
+            except Exception as e:
+                error_msg = str(e)
+                self.logger.warning(f"页面执行上下文异常: {error_msg}")
+                
+                # 检查是否是执行上下文被销毁
+                if "execution context was destroyed" in error_msg.lower() or "context was destroyed" in error_msg.lower():
+                    self.logger.warning("检测到执行上下文被销毁，尝试恢复...")
+                    return await self._recover_from_context_destroyed()
+                
+                # 检查是否是导航相关错误
+                if "navigation" in error_msg.lower():
+                    self.logger.warning("检测到导航相关错误，尝试重新导航...")
+                    return await self._recover_from_navigation_error()
+                
+                # 其他未知错误
+                self.logger.error(f"未知页面错误: {error_msg}")
+                return await self._attempt_general_recovery()
+                
+        except Exception as e:
+            self.logger.error(f"页面状态检查失败: {e}")
+            return False
+
+    async def _recreate_page(self) -> bool:
+        """重新创建页面"""
+        try:
+            self.logger.info("尝试重新创建页面...")
+            
+            # 重新启动浏览器管理器
+            await self.browser_manager.close()
+            success = await self.browser_manager.start(headless=True)
+            
+            if success:
+                # 重新初始化Twitter客户端
+                self.twitter_client = TwitterClient(self.browser_manager.page)
+                
+                # 尝试加载保存的cookies进行自动登录
+                await self._attempt_auto_login()
+                
+                self.logger.info("✅ 页面重新创建成功")
+                return True
+            else:
+                self.logger.error("重新创建页面失败")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"重新创建页面失败: {e}")
+            return False
+
+    async def _is_redirected_to_login(self) -> bool:
+        """检查是否被重定向到登录页面"""
+        try:
+            current_url = self.browser_manager.page.url
+            title = await self.browser_manager.page.title()
+            
+            # 检查URL和标题
+            login_indicators = [
+                "login" in current_url.lower(),
+                "flow/login" in current_url.lower(), 
+                "log in" in title.lower(),
+                "sign in" in title.lower(),
+                "登录" in title.lower()
+            ]
+            
+            if any(login_indicators):
+                return True
+            
+            # 检查页面内容
+            try:
+                login_form = self.browser_manager.page.locator('input[autocomplete="username"], input[name="text"]')
+                if await login_form.count() > 0:
+                    return True
+            except:
+                pass
+                
+            return False
+            
+        except Exception as e:
+            self.logger.debug(f"检查登录重定向失败: {e}")
+            return False
+
+    async def _is_error_page(self) -> bool:
+        """检查是否在错误页面"""
+        try:
+            # 检查常见错误页面标识
+            error_selectors = [
+                'text="Something went wrong"',
+                'text="出现了问题"',
+                'text="Sorry, that page doesn\'t exist"',
+                'text="Try again"',
+                'text="Rate limited"'
+            ]
+            
+            for selector in error_selectors:
+                try:
+                    if await self.browser_manager.page.locator(selector).count() > 0:
+                        return True
+                except:
+                    continue
+            
+            # 检查页面内容
+            try:
+                page_content = await self.browser_manager.page.content()
+                error_keywords = ["something went wrong", "出现了问题", "rate limited", "try again"]
+                if any(keyword in page_content.lower() for keyword in error_keywords):
+                    return True
+            except:
+                pass
+                
+            return False
+            
+        except Exception as e:
+            self.logger.debug(f"检查错误页面失败: {e}")
+            return False
+
+    async def _handle_login_redirect(self) -> bool:
+        """处理登录重定向"""
+        try:
+            self.logger.info("处理登录重定向...")
+            
+            # 尝试使用cookies自动登录
+            login_success = await self._attempt_auto_login()
+            
+            if login_success:
+                self.logger.info("✅ 自动登录成功")
+                return True
+            else:
+                self.logger.warning("❌ 自动登录失败，可能需要手动登录")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"处理登录重定向失败: {e}")
+            return False
+
+    async def _recover_from_context_destroyed(self) -> bool:
+        """从执行上下文被销毁中恢复"""
+        try:
+            self.logger.info("尝试从执行上下文销毁中恢复...")
+            
+            # 等待一段时间让页面稳定
+            await asyncio.sleep(3)
+            
+            # 尝试刷新页面
+            try:
+                await self.browser_manager.page.reload(timeout=20000)
+                await self.browser_manager.page.wait_for_load_state("domcontentloaded", timeout=15000)
+                self.logger.info("✅ 页面刷新成功")
+                
+                # 重新检查登录状态
+                if await self._is_redirected_to_login():
+                    return await self._handle_login_redirect()
+                    
+                return True
+                
+            except Exception as e:
+                self.logger.warning(f"页面刷新失败: {e}")
+                
+                # 尝试重新导航到主页
+                try:
+                    await self.browser_manager.page.goto("https://x.com/home", timeout=20000)
+                    await self.browser_manager.page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    self.logger.info("✅ 重新导航到主页成功")
+                    
+                    # 检查是否需要登录
+                    if await self._is_redirected_to_login():
+                        return await self._handle_login_redirect()
+                        
+                    return True
+                    
+                except Exception as e2:
+                    self.logger.error(f"重新导航失败: {e2}")
+                    return False
+                    
+        except Exception as e:
+            self.logger.error(f"从执行上下文销毁中恢复失败: {e}")
+            return False
+
+    async def _recover_from_navigation_error(self) -> bool:
+        """从导航错误中恢复"""
+        try:
+            self.logger.info("尝试从导航错误中恢复...")
+            
+            # 等待页面稳定
+            await asyncio.sleep(2)
+            
+            # 尝试导航到安全页面
+            await self.browser_manager.page.goto("https://x.com", timeout=20000)
+            await self.browser_manager.page.wait_for_load_state("domcontentloaded", timeout=15000)
+            
+            # 检查登录状态
+            if await self._is_redirected_to_login():
+                return await self._handle_login_redirect()
+                
+            self.logger.info("✅ 从导航错误中恢复成功")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"从导航错误中恢复失败: {e}")
+            return False
+
+    async def _recover_from_error_page(self) -> bool:
+        """从错误页面恢复"""
+        try:
+            self.logger.info("尝试从错误页面恢复...")
+            
+            # 等待一段时间
+            await asyncio.sleep(5)
+            
+            # 尝试刷新页面
+            await self.browser_manager.page.reload(timeout=20000)
+            await self.browser_manager.page.wait_for_load_state("domcontentloaded", timeout=15000)
+            
+            # 如果仍然是错误页面，尝试导航到主页
+            if await self._is_error_page():
+                await self.browser_manager.page.goto("https://x.com/home", timeout=20000)
+                await self.browser_manager.page.wait_for_load_state("domcontentloaded", timeout=15000)
+            
+            self.logger.info("✅ 从错误页面恢复成功")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"从错误页面恢复失败: {e}")
+            return False
+
+    async def _attempt_general_recovery(self) -> bool:
+        """尝试通用恢复方法"""
+        try:
+            self.logger.info("尝试通用恢复方法...")
+            
+            # 策略1：等待并刷新
+            await asyncio.sleep(3)
+            try:
+                await self.browser_manager.page.reload(timeout=20000)
+                await self.browser_manager.page.wait_for_load_state("domcontentloaded", timeout=15000)
+                if not await self._is_error_page():
+                    self.logger.info("✅ 刷新恢复成功")
+                    return True
+            except:
+                pass
+            
+            # 策略2：重新导航
+            try:
+                await self.browser_manager.page.goto("https://x.com/home", timeout=20000)
+                await self.browser_manager.page.wait_for_load_state("domcontentloaded", timeout=15000)
+                if not await self._is_error_page():
+                    self.logger.info("✅ 重新导航恢复成功")
+                    return True
+            except:
+                pass
+            
+            # 策略3：重新创建页面
+            return await self._recreate_page()
+            
+        except Exception as e:
+            self.logger.error(f"通用恢复方法失败: {e}")
+            return False
+
+    async def _attempt_auto_login(self) -> bool:
+        """尝试自动登录"""
+        try:
+            if not self.account_config:
+                self.logger.debug("未配置账号信息，跳过自动登录")
+                return False
+            
+            self.logger.info("尝试自动登录...")
+            
+            # 尝试使用Twitter客户端的check_login_status方法
+            try:
+                is_logged_in = await self.twitter_client.check_login_status()
+                if is_logged_in:
+                    self.logger.info("✅ 检测到已登录状态")
+                    return True
+            except Exception as e:
+                self.logger.debug(f"登录状态检查失败: {e}")
+            
+            # 如果未登录，尝试加载cookies
+            try:
+                await self.twitter_client.load_cookies(self.account_config.account_id)
+                
+                # 导航到主页验证登录状态
+                await self.browser_manager.page.goto("https://x.com/home", timeout=20000)
+                await self.browser_manager.page.wait_for_load_state("domcontentloaded", timeout=15000)
+                
+                # 再次检查登录状态
+                is_logged_in = await self.twitter_client.check_login_status()
+                if is_logged_in:
+                    self.logger.info("✅ 通过cookies自动登录成功")
+                    return True
+                else:
+                    self.logger.warning("❌ cookies登录失败")
+                    return False
+                    
+            except Exception as e:
+                self.logger.debug(f"cookies登录失败: {e}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"自动登录失败: {e}")
+            return False
     
     async def _handle_cookie_popup_manual(self):
         """手动检查并处理Cookie弹窗"""

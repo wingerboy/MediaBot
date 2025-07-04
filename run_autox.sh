@@ -21,8 +21,9 @@ while true; do
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始第 $counter 次执行..."
     
     # 执行python命令
-    # python autox.py --config config/tasks/job_auto_comment.json --account-id wingerbaby
-    python autox.py --config config/tasks/job_auto_comment.json --multi-account
+    python autox.py --config config/tasks/job_auto_comment.json --account-id wingerbaby
+    # python autox.py --config config/tasks/job_auto_comment.json --account-id uAgentDoctor
+    # python autox.py --config config/tasks/job_auto_comment.json --multi-account
     
     # 检查执行结果
     exit_code=$?
@@ -35,7 +36,7 @@ while true; do
     # 增加计数器
     counter=$((counter + 1))
     
-    # 等待90分钟 (5400秒)
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 等待90分钟后进行下次执行..."
-    sleep 5400
+    # 等待60分钟 (3600秒)
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 等待60分钟后进行下次执行..."
+    sleep 3600
 done

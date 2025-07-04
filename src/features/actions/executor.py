@@ -1353,11 +1353,31 @@ class ActionExecutor:
         try:
             # 检查页面是否关闭
             if self.page.is_closed():
+                self.logger.warning("页面已关闭")
                 return False
             
             # 尝试获取页面标题来验证页面是否响应
-            await self.page.title()
-            return True
+            try:
+                title = await self.page.title()
+                self.logger.debug(f"页面可用，标题: {title}")
+                return True
+            except Exception as e:
+                error_msg = str(e)
+                self.logger.warning(f"页面标题获取失败: {error_msg}")
+                
+                # 检查是否是执行上下文被销毁
+                if "execution context was destroyed" in error_msg.lower() or "context was destroyed" in error_msg.lower():
+                    self.logger.warning("检测到执行上下文被销毁，页面不可用")
+                    return False
+                
+                # 检查是否是导航相关错误
+                if "navigation" in error_msg.lower():
+                    self.logger.warning("检测到导航相关错误，页面不可用")
+                    return False
+                
+                # 其他错误也认为页面不可用
+                return False
+                
         except Exception as e:
             self.logger.debug(f"页面可用性检查失败: {e}")
             return False
