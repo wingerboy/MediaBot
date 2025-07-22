@@ -23,7 +23,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-async def get_and_save_cookies(account_id: str):
+async def get_and_save_cookies(account_id: str, force_relogin: bool = False):
     """获取指定账号的cookies并保存"""
     browser_manager = None
     twitter_client = None
@@ -66,17 +66,38 @@ async def get_and_save_cookies(account_id: str):
             print(f"⚠️  浏览器预热失败，继续执行: {e}")
         
         # 检查登录状态
-        print("🔍 检查登录状态...")
-        is_logged_in = await twitter_client.check_login_status()
+        need_login = True
         
-        if not is_logged_in:
+        if not force_relogin:
+            print("🔍 检查登录状态...")
+            is_logged_in = await twitter_client.check_login_status()
+            
+            if is_logged_in:
+                print("✅ 检测到已登录状态")
+                response = input("是否要重新登录以获取最新cookie？(y/N): ").strip().lower()
+                if response in ['y', 'yes']:
+                    need_login = True
+                    print("🔄 将执行重新登录...")
+                else:
+                    need_login = False
+                    print("✅ 使用现有登录状态")
+        else:
+            print("🔄 强制重新登录模式...")
+            need_login = True
+        
+        if need_login:
             print("📝 需要登录，请在浏览器中完成登录...")
-            print("⚠️  完成登录后请按Enter键继续...")
+            
+            # 先清除现有cookie以确保重新登录
+            if force_relogin:
+                print("🧹 清除现有cookie...")
+                await browser_manager.page.context.clear_cookies()
             
             # 导航到登录页面
             await browser_manager.page.goto("https://x.com/i/flow/login")
+            await browser_manager.page.wait_for_load_state("domcontentloaded", timeout=10000)
             
-            # 等待用户手动登录
+            print("⚠️  完成登录后请按Enter键继续...")
             input("请在浏览器中完成登录，然后按Enter键继续...")
             
             # 再次检查登录状态
@@ -85,8 +106,10 @@ async def get_and_save_cookies(account_id: str):
             if not is_logged_in:
                 print("❌ 登录验证失败")
                 return False
-        
-        print("✅ 登录状态验证成功")
+            
+            print("✅ 登录状态验证成功")
+        else:
+            print("✅ 跳过登录，使用现有状态")
         
         # 获取用户信息
         try:
@@ -226,6 +249,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Twitter账号Cookie获取工具")
     parser.add_argument("account_id", nargs="?", help="账号ID")
     parser.add_argument("--list", action="store_true", help="列出所有账号")
+    parser.add_argument("--force", "-f", action="store_true", help="强制重新登录，清除现有cookie")
     
     args = parser.parse_args()
     
@@ -235,11 +259,12 @@ async def main():
     
     if not args.account_id:
         print("使用方法:")
-        print("  python get_cookies.py <account_id>  # 获取指定账号的cookies")
-        print("  python get_cookies.py --list        # 列出所有账号")
+        print("  python get_cookies.py <account_id>         # 获取指定账号的cookies")
+        print("  python get_cookies.py <account_id> --force # 强制重新登录获取cookies")
+        print("  python get_cookies.py --list               # 列出所有账号")
         return
     
-    success = await get_and_save_cookies(args.account_id)
+    success = await get_and_save_cookies(args.account_id, force_relogin=args.force)
     if success:
         print("🎉 操作完成!")
     else:

@@ -14,7 +14,7 @@
     "is_live": true,
     "min_likes": 1,
     "max_age_hours": 24,
-    "exclude_keywords": ["广告", "spam", "promotion"]
+    "exclude_keywords": ["广告", "spam", "promotion","crypto","blockchain","eth","btc","binance","bnb"]
   },
   "actions": [
     {
@@ -28,7 +28,7 @@
         "max_like_count": 3000,
         "min_view_count": 30,
         "min_content_length": 20,
-        "exclude_keywords": ["广告", "spam", "promotion"]
+        "exclude_keywords": ["广告", "spam", "promotion","crypto","blockchain","eth","btc","binance","bnb"]
       }
     },
     {
@@ -54,7 +54,7 @@
         "min_content_length": 30,
         "max_content_length": 300,
         "has_media": null,
-        "exclude_keywords": ["广告", "spam", "promotion"]
+        "exclude_keywords": ["广告", "spam", "promotion","crypto","blockchain","eth","btc","binance","bnb"]
       }
     },
     {
@@ -68,7 +68,7 @@
         "min_view_count": 100,
         "min_content_length": 20,
         "verified_only": null,
-        "exclude_keywords": ["广告", "spam", "promotion"]
+        "exclude_keywords": ["广告", "spam", "promotion","crypto","blockchain","eth","btc","binance","bnb"]
       }
     }
   ]

@@ -466,6 +466,13 @@ class ActionConditions:
         if self.max_content_length is not None and content_length > self.max_content_length:
             return False
         
+        # 排除关键词检查
+        if self.exclude_keywords:
+            content_text = content.lower()
+            for keyword in self.exclude_keywords:
+                if keyword.lower() in content_text:
+                    return False
+        
         return True
     
     def _check_time_conditions(self, tweet_data: Dict[str, Any]) -> bool:

@@ -9,6 +9,11 @@ from playwright_stealth import Stealth
 
 from ...utils.logger import log
 from ...utils.storage import storage
+import sys
+from pathlib import Path
+
+# 确保能导入config.settings
+sys.path.append(str(Path(__file__).parent.parent.parent.parent))
 from config.settings import settings
 
 class BrowserManager:
