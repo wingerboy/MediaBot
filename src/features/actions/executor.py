@@ -434,43 +434,249 @@ class ActionExecutor:
     
     async def _execute_comment(self, tweet_element: Any, tweet_info: Dict[str, Any], 
                              action_config: ActionConfig) -> ActionResult:
-        """执行评论操作 - 使用验证有效的方法"""
+        """执行评论操作 - 增强版，包含完整的可用性检测和状态管理"""
+        username = tweet_info.get('username', 'unknown')
+        
         try:
-            username = tweet_info.get('username', 'unknown')
             self.logger.debug(f"准备评论推文: {username}")
             
-            # 获取评论内容
+            # ====== 第一阶段：预检测 ======
+            # 1. 确保页面干净
+            await self.selector.ensure_clean_page_state()
+            
+            # 2. 检测回复可用性
+            reply_status = await self._check_reply_availability(tweet_element, username)
+            if reply_status != "available":
+                self.logger.info(f"推文不支持评论: {reply_status} (@{username})")
+                return ActionResult.SKIPPED
+            
+            # ====== 第二阶段：准备评论 ======
+            # 3. 获取评论内容
             comment_text = await self._generate_comment_text(tweet_info, action_config)
             if not comment_text:
                 self.logger.warning(f"未能获取评论内容 (@{username})")
                 return ActionResult.FAILED
             
-            # 使用验证有效的选择器查找回复按钮
+            # 4. 查找并点击回复按钮
             reply_button = await self.selector.find_reply_button(tweet_element)
-            
             if not reply_button:
                 self.logger.warning(f"未找到回复按钮 (@{username})")
                 return ActionResult.FAILED
             
-            # 点击回复按钮打开评论框
             self.logger.info(f"点击回复按钮...")
             if not await self.selector.safe_click_element(reply_button, "回复按钮"):
                 self.logger.error(f"点击回复按钮失败 (@{username})")
+                await self._ensure_modal_cleanup(username)
                 return ActionResult.ERROR
             
-            # 等待模态框出现
+            # ====== 第三阶段：处理评论模态框 ======
+            # 5. 等待并验证模态框状态
+            modal_result = await self._handle_comment_modal(comment_text, username)
+            
+            if modal_result == "success":
+                # 6. 确保模态框完全关闭
+                cleanup_success = await self._ensure_modal_cleanup(username)
+                if cleanup_success:
+                    self.logger.info(f"✅ 评论完成，状态清理成功 (@{username})")
+                    return ActionResult.SUCCESS
+                else:
+                    self.logger.warning(f"⚠️ 评论完成，但状态清理失败 (@{username})")
+                    return ActionResult.SUCCESS  # 评论本身成功了
+            elif modal_result == "restricted":
+                self.logger.info(f"📝 检测到评论限制，跳过此推文 (@{username})")
+                await self._ensure_modal_cleanup(username)
+                return ActionResult.SKIPPED
+            else:
+                self.logger.error(f"❌ 评论模态框处理失败 (@{username})")
+                await self._ensure_modal_cleanup(username)
+                return ActionResult.ERROR
+                
+        except Exception as e:
+            self.logger.error(f"评论操作异常: {e}")
+            await self._ensure_modal_cleanup(username)
+            return ActionResult.ERROR
+
+    async def _check_reply_availability(self, tweet_element: Any, username: str) -> str:
+        """检测推文的回复可用性 - 使用data-testid策略"""
+        try:
+            # 1. 使用验证有效的方法查找回复按钮 [data-testid="reply"]
+            reply_button = await self.selector.find_reply_button(tweet_element)
+            if not reply_button:
+                self.logger.debug(f"未找到回复按钮 (@{username})")
+                return "no_button"
+            
+            # 2. 检查按钮是否被禁用
+            is_disabled = await reply_button.get_attribute("disabled")
+            if is_disabled:
+                self.logger.debug(f"回复按钮被禁用 (@{username})")
+                return "disabled"
+            
+            # 3. 检查按钮是否可见且可点击
+            if not await reply_button.is_visible():
+                self.logger.debug(f"回复按钮不可见 (@{username})")
+                return "not_visible"
+            
+            # 4. 检查aria-label是否包含限制信息
+            aria_label = await reply_button.get_attribute("aria-label") or ""
+            if any(keyword in aria_label.lower() for keyword in ["restricted", "限制", "disabled", "禁用"]):
+                self.logger.debug(f"回复按钮aria-label显示限制: {aria_label} (@{username})")
+                return "restricted_aria"
+            
+            # 5. 检查推文容器是否有限制提示
+            try:
+                # 在推文容器中查找常见的限制提示
+                restriction_patterns = [
+                    'text=/replies.*restricted/i',
+                    'text=/回复.*限制/i', 
+                    'text=/作者.*限制/i',
+                    'text=/conversation.*restricted/i'
+                ]
+                
+                for pattern in restriction_patterns:
+                    restriction_elements = await tweet_element.locator(pattern).all()
+                    if restriction_elements:
+                        for elem in restriction_elements:
+                            if await elem.is_visible():
+                                text = await elem.text_content() or ""
+                                self.logger.debug(f"发现限制提示: {text} (@{username})")
+                                return "restricted_text"
+            except Exception as e:
+                self.logger.debug(f"限制提示检测失败: {e}")
+            
+            return "available"
+            
+        except Exception as e:
+            self.logger.debug(f"回复可用性检测失败: {e}")
+            return "unknown"  # 不确定时假设可用，避免误报
+    
+    async def _handle_comment_modal(self, comment_text: str, username: str) -> str:
+        """处理评论模态框的完整流程"""
+        try:
+            # 1. 等待模态框出现
+            modal_appeared = False
+            for attempt in range(10):  # 等待最多5秒
+                await asyncio.sleep(0.5)
+                dialogs = await self.page.locator('[role="dialog"]').all()
+                if dialogs:
+                    modal_appeared = True
+                    break
+            
+            if not modal_appeared:
+                self.logger.error(f"评论模态框未出现 (@{username})")
+                return "no_modal"
+            
+            # 2. 获取最新的模态框
+            dialogs = await self.page.locator('[role="dialog"]').all()
+            dialog = dialogs[-1]
+            self.logger.debug(f"发现 {len(dialogs)} 个模态框，使用最新的")
+            
+            # 3. 检测模态框内是否有限制提示
+            restriction_check = await self._check_modal_restrictions(dialog)
+            if restriction_check != "available":
+                return restriction_check
+            
+            # 4. 查找并处理输入框
+            input_result = await self._handle_comment_input(dialog, comment_text, username)
+            if not input_result:
+                return "input_failed"
+            
+            # 5. 查找并点击发布按钮
+            post_result = await self._handle_post_button(dialog, username)
+            if not post_result:
+                return "post_failed"
+            
+            # 6. 等待发布完成
             await asyncio.sleep(2)
             
-            # 检查模态框
-            dialogs = await self.page.locator('[role="dialog"]').all()
-            if not dialogs:
-                self.logger.error(f"回复模态框未出现 (@{username})")
-                return ActionResult.ERROR
+            return "success"
             
-            dialog = dialogs[-1]  # 最新的模态框
-            self.logger.info(f"发现 {len(dialogs)} 个模态框")
+        except Exception as e:
+            self.logger.error(f"评论模态框处理异常: {e}")
+            return "error"
+    
+    async def _check_modal_restrictions(self, dialog) -> str:
+        """检查模态框内的限制提示 - 使用DOM结构检测"""
+        try:
+            # 1. 检查是否有错误或警告的data-testid元素
+            error_testids = [
+                '[data-testid="error"]',
+                '[data-testid="toast"]',
+                '[data-testid="banner"]'
+            ]
             
-            # 在模态框中查找输入框 - 使用验证有效的选择器
+            for testid in error_testids:
+                try:
+                    elements = await dialog.locator(testid).all()
+                    for elem in elements:
+                        if await elem.is_visible():
+                            text = await elem.text_content() or ""
+                            if any(keyword in text.lower() for keyword in ["restrict", "limit", "can't reply", "限制", "无法回复"]):
+                                self.logger.debug(f"检测到限制元素: {testid}, 内容: {text}")
+                                return "restricted"
+                except:
+                    continue
+            
+            # 2. 检查role="alert"的警告消息
+            try:
+                alert_elements = await dialog.locator('[role="alert"]').all()
+                for alert in alert_elements:
+                    if await alert.is_visible():
+                        text = await alert.text_content() or ""
+                        if any(keyword in text.lower() for keyword in ["restrict", "can't", "unable", "限制", "无法"]):
+                            self.logger.debug(f"检测到警告消息: {text}")
+                            return "restricted"
+            except:
+                pass
+            
+            # 3. 检查常见的限制提示文本（使用更精确的文本匹配）
+            restriction_texts = [
+                "You can't reply to this conversation",
+                "Replies to this Tweet are limited",
+                "回复受限",
+                "无法回复此对话",
+                "作者已限制回复",
+                "replies are restricted"
+            ]
+            
+            for text_pattern in restriction_texts:
+                try:
+                    # 使用精确文本匹配而非正则表达式，提高准确性
+                    elements = await dialog.locator(f'text={text_pattern}').all()
+                    if not elements:
+                        # 如果精确匹配失败，尝试包含匹配
+                        elements = await dialog.locator(f'text*={text_pattern}').all()
+                    
+                    for elem in elements:
+                        if await elem.is_visible():
+                            self.logger.debug(f"检测到限制提示文本: {text_pattern}")
+                            return "restricted"
+                except:
+                    continue
+            
+            # 4. 检查是否缺少输入框（可能表示评论被限制）
+            try:
+                input_elements = await dialog.locator('[data-testid="tweetTextarea_0"], div[contenteditable="true"]').all()
+                visible_inputs = []
+                for inp in input_elements:
+                    if await inp.is_visible():
+                        visible_inputs.append(inp)
+                
+                if not visible_inputs:
+                    self.logger.debug("模态框中未找到可见的输入框，可能被限制")
+                    return "no_input"
+            except:
+                pass
+            
+            return "available"
+            
+        except Exception as e:
+            self.logger.debug(f"限制检测失败: {e}")
+            return "available"  # 检测失败时假设可用，避免误拦截
+    
+    async def _handle_comment_input(self, dialog, comment_text: str, username: str) -> bool:
+        """处理评论输入框 - 使用验证有效的选择器策略"""
+        try:
+            # 查找输入框 - 与验证有效的perform_comment_action方法保持一致
             input_selectors = [
                 '[data-testid="tweetTextarea_0"]',
                 'div[contenteditable="true"]',
@@ -484,7 +690,7 @@ class ActionExecutor:
                     for elem in elements:
                         if await elem.is_visible():
                             input_element = elem
-                            self.logger.info(f"找到输入框: {selector}")
+                            self.logger.debug(f"找到输入框: {selector}")
                             break
                     if input_element:
                         break
@@ -492,17 +698,46 @@ class ActionExecutor:
                     continue
             
             if not input_element:
-                self.logger.error(f"未找到输入框 (@{username})")
-                return ActionResult.ERROR
+                self.logger.error(f"未找到有效的输入框 (@{username})")
+                return False
             
             # 输入评论内容
             self.logger.info(f"输入评论内容: '{comment_text}' (@{username})")
-            await input_element.click()
-            await asyncio.sleep(0.5)
-            await input_element.fill(comment_text)
-            await asyncio.sleep(1)
             
-            # 查找发布按钮 - 使用验证有效的选择器
+            # 先点击确保聚焦
+            await input_element.click()
+            await asyncio.sleep(0.3)
+            
+            # 清空可能的默认内容
+            await input_element.clear()
+            await asyncio.sleep(0.2)
+            
+            # 输入内容
+            await input_element.fill(comment_text)
+            await asyncio.sleep(0.5)
+            
+            # 验证内容是否输入成功
+            content = await input_element.text_content() or ""
+            if comment_text in content:
+                self.logger.debug(f"输入内容验证成功")
+                return True
+            else:
+                self.logger.warning(f"输入内容验证失败，重试...")
+                # 重试一次
+                await input_element.clear()
+                await asyncio.sleep(0.2)
+                await input_element.type(comment_text)
+                await asyncio.sleep(0.5)
+                return True
+            
+        except Exception as e:
+            self.logger.error(f"输入框处理失败: {e}")
+            return False
+    
+    async def _handle_post_button(self, dialog, username: str) -> bool:
+        """处理发布按钮 - 使用验证有效的选择器策略"""
+        try:
+            # 查找发布按钮 - 与验证有效的perform_comment_action方法保持一致
             post_selectors = [
                 'button[data-testid="tweetButton"]',
                 'button[data-testid="tweetButtonInline"]',
@@ -517,7 +752,7 @@ class ActionExecutor:
                     for elem in elements:
                         if await elem.is_visible() and await elem.is_enabled():
                             post_button = elem
-                            self.logger.info(f"找到发布按钮: {selector}")
+                            self.logger.debug(f"找到发布按钮: {selector}")
                             break
                     if post_button:
                         break
@@ -525,20 +760,127 @@ class ActionExecutor:
                     continue
             
             if not post_button:
-                self.logger.error(f"未找到发布按钮 (@{username})")
-                return ActionResult.ERROR
+                self.logger.error(f"未找到有效的发布按钮 (@{username})")
+                return False
             
-            # 发布评论
-            self.logger.info(f"发布评论... (@{username})")
+            # 点击发布按钮
+            self.logger.info(f"点击发布按钮... (@{username})")
             await post_button.click()
-            await asyncio.sleep(3)
             
-            self.logger.info(f"✅ 评论发布成功 (@{username})")
-            return ActionResult.SUCCESS
+            # 等待发布处理
+            await asyncio.sleep(1)
+            
+            # 验证按钮状态变化（通常会变为disabled或loading状态）  
+            try:
+                is_disabled = await post_button.get_attribute("disabled")
+                if is_disabled:
+                    self.logger.debug("发布按钮已禁用，推文正在发布")
+            except:
+                pass
+            
+            return True
             
         except Exception as e:
-            self.logger.error(f"评论操作异常: {e}")
-            return ActionResult.ERROR
+            self.logger.error(f"发布按钮处理失败: {e}")
+            return False
+    
+    async def _ensure_modal_cleanup(self, username: str) -> bool:
+        """确保模态框完全清理干净"""
+        try:
+            self.logger.debug(f"开始模态框清理检查... (@{username})")
+            
+            # 1. 等待一下让自然关闭过程完成
+            await asyncio.sleep(1.5)
+            
+            # 2. 检查当前模态框状态
+            cleanup_success = False
+            for attempt in range(6):  # 最多尝试6次，每次间隔递增
+                dialogs = await self.page.locator('[role="dialog"]').all()
+                
+                if not dialogs:
+                    self.logger.debug(f"✅ 无模态框存在，清理完成 (@{username})")
+                    cleanup_success = True
+                    break
+                
+                self.logger.debug(f"第{attempt+1}次清理，发现{len(dialogs)}个模态框...")
+                
+                if attempt < 3:
+                    # 前3次：温和方式
+                    success = await self.selector.ensure_comment_modal_closed()
+                    if success:
+                        cleanup_success = True
+                        break
+                elif attempt < 5:
+                    # 第4-5次：强制方式
+                    await self.selector.force_close_modals()
+                else:
+                    # 最后一次：终极清理
+                    await self._ultimate_modal_cleanup()
+                
+                # 递增等待时间
+                await asyncio.sleep(0.5 + attempt * 0.2)
+            
+            # 3. 最终验证
+            final_dialogs = await self.page.locator('[role="dialog"]').all()
+            final_success = len(final_dialogs) == 0
+            
+            if final_success:
+                self.logger.info(f"✅ 模态框清理完成 (@{username})")
+            else:
+                self.logger.warning(f"⚠️ 模态框清理不完全，剩余{len(final_dialogs)}个 (@{username})")
+            
+            return final_success
+            
+        except Exception as e:
+            self.logger.error(f"模态框清理异常: {e}")
+            return False
+    
+    async def _ultimate_modal_cleanup(self):
+        """终极模态框清理方案"""
+        try:
+            self.logger.debug("🚨 执行终极模态框清理...")
+            
+            # 1. 多次ESC
+            for _ in range(5):
+                await self.page.keyboard.press('Escape')
+                await asyncio.sleep(0.1)
+            
+            # 2. 点击页面多个位置
+            click_positions = [(50, 50), (100, 200), (200, 100)]
+            for x, y in click_positions:
+                try:
+                    await self.page.mouse.click(x, y)
+                    await asyncio.sleep(0.1)
+                except:
+                    continue
+            
+            # 3. 强制移除DOM元素
+            await self.page.evaluate("""
+                () => {
+                    // 移除所有dialog角色的元素
+                    document.querySelectorAll('[role="dialog"]').forEach(el => {
+                        console.log('移除残留模态框:', el);
+                        el.remove();
+                    });
+                    
+                    // 移除高z-index的遮罩层
+                    document.querySelectorAll('*').forEach(el => {
+                        const style = window.getComputedStyle(el);
+                        if (style.position === 'fixed' && parseInt(style.zIndex) > 1000) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > window.innerWidth * 0.5 && rect.height > window.innerHeight * 0.5) {
+                                console.log('移除大遮罩:', el);
+                                el.remove();
+                            }
+                        }
+                    });
+                }
+            """)
+            
+            self.logger.debug("✅ 终极清理完成")
+            
+        except Exception as e:
+            self.logger.error(f"终极清理失败: {e}")
     
     async def _generate_comment_text(self, tweet_info: Dict[str, Any], action_config: ActionConfig) -> Optional[str]:
         """生成评论文本"""
@@ -793,196 +1135,6 @@ class ActionExecutor:
                 
         except Exception as e:
             self.logger.debug(f"页面可用性检查失败: {e}")
-            return False
-    
-    async def _check_and_dismiss_cookie_popup(self):
-        """检查并清除Cookie弹窗"""
-        try:
-            cookie_mask = self.page.locator('[data-testid="twc-cc-mask"]')
-            mask_count = await cookie_mask.count()
-            
-            if mask_count > 0:
-                self.logger.debug(f"🍪 检测到Cookie弹窗遮罩，强制移除...")
-                await self._force_remove_cookie_mask()
-                await asyncio.sleep(1)  # 等待遮罩消失
-                return True
-            return True
-        except Exception as e:
-            self.logger.debug(f"检查Cookie弹窗失败: {e}")
-            return True
-    
-    async def _force_remove_cookie_mask(self):
-        """强制移除Cookie遮罩层 - 增强版"""
-        try:
-            await self.page.evaluate("""
-                (() => {
-                    console.log('🔧 强制移除Cookie遮罩层...');
-                    
-                    // 1. 移除Cookie同意遮罩
-                    document.querySelectorAll('[data-testid="twc-cc-mask"]').forEach((mask, index) => {
-                        console.log('移除Cookie遮罩', index, mask);
-                        mask.remove();
-                    });
-                    
-                    // 2. 移除所有data-testid="mask"的元素
-                    document.querySelectorAll('[data-testid="mask"]').forEach((mask, index) => {
-                        console.log('移除通用遮罩', index, mask);
-                        mask.remove();
-                    });
-                    
-                    // 3. 移除所有具有特定遮罩类的元素
-                    const overlayClasses = [
-                        'r-1p0dtai', 'r-1d2f490', 'r-1xcajam', 'r-zchlnj', 'r-ipm5af', 'r-1ffj0ar'
-                    ];
-                    overlayClasses.forEach(className => {
-                        document.querySelectorAll('.' + className).forEach(el => {
-                            const style = window.getComputedStyle(el);
-                            if (style.position === 'fixed' && (parseInt(style.zIndex) > 999 || el.dataset.testid === 'mask')) {
-                                console.log('移除覆盖层:', className, el);
-                                el.remove();
-                            }
-                        });
-                    });
-                    
-                    // 4. 清理layers容器
-                    const layersContainer = document.querySelector('#layers');
-                    if (layersContainer) {
-                        Array.from(layersContainer.children).forEach((child, index) => {
-                            const style = window.getComputedStyle(child);
-                            if (style.position === 'fixed' && parseInt(style.zIndex) > 999) {
-                                console.log('移除layers子元素', index, child);
-                                child.remove();
-                            }
-                        });
-                    }
-                    
-                    // 5. 强制设置body和html的pointer-events
-                    document.body.style.pointerEvents = 'auto';
-                    document.documentElement.style.pointerEvents = 'auto';
-                    
-                    // 6. 隐藏或移除所有可能的阻挡元素
-                    document.querySelectorAll('div').forEach(div => {
-                        const style = window.getComputedStyle(div);
-                        if (style.position === 'fixed' && 
-                            (parseInt(style.zIndex) > 999 || div.dataset.testid === 'mask' || div.dataset.testid === 'twc-cc-mask')) {
-                            div.style.display = 'none';
-                            div.style.pointerEvents = 'none';
-                        }
-                    });
-                    
-                    console.log('✅ 强制移除遮罩完成');
-                })();
-            """)
-            return True
-        except Exception as e:
-            self.logger.debug(f"强制移除遮罩失败: {e}")
-            return False
-
-    async def _gentle_clear_blockers(self):
-        """温和地清理阻挡元素（避免破坏页面结构）"""
-        try:
-            await self.page.evaluate("""
-                (() => {
-                    console.log('🧹 温和清理阻挡元素...');
-                    
-                    // 1. 只移除明确的遮罩元素
-                    document.querySelectorAll('[data-testid*="mask"]').forEach(el => {
-                        if (el.dataset.testid && (el.dataset.testid.includes('mask') || el.dataset.testid === 'twc-cc-mask')) {
-                            console.log('移除遮罩元素:', el);
-                            el.remove();
-                        }
-                    });
-                    
-                    // 2. 只处理明显的阻挡层（高z-index且覆盖大部分屏幕）
-                    document.querySelectorAll('*').forEach(el => {
-                        const style = window.getComputedStyle(el);
-                        if (style.position === 'fixed' && parseInt(style.zIndex) > 9999) {
-                            const rect = el.getBoundingClientRect();
-                            // 只移除覆盖超过80%屏幕的大遮罩
-                            if (rect.width > window.innerWidth * 0.8 && rect.height > window.innerHeight * 0.8) {
-                                console.log('移除大遮罩:', el, 'z-index:', style.zIndex);
-                                el.style.display = 'none';
-                                el.style.pointerEvents = 'none';
-                            }
-                        }
-                    });
-                    
-                    // 3. 恢复body交互
-                    document.body.style.pointerEvents = 'auto';
-                    
-                    console.log('✅ 温和清理完成');
-                })();
-            """)
-            return True
-        except Exception as e:
-            self.logger.debug(f"温和清理失败: {e}")
-            return False
-
-    async def _aggressive_clear_blockers(self):
-        """激进地清理所有可能的阻挡元素（仅在必要时使用）"""
-        try:
-            await self.page.evaluate("""
-                (() => {
-                    console.log('🔧 激进清理阻挡元素...');
-                    
-                    // 1. 移除所有testid包含mask的元素
-                    document.querySelectorAll('[data-testid*="mask"]').forEach(el => {
-                        console.log('移除mask元素:', el);
-                        el.remove();
-                    });
-                    
-                    // 2. 移除所有高z-index的fixed元素
-                    document.querySelectorAll('*').forEach(el => {
-                        const style = window.getComputedStyle(el);
-                        if (style.position === 'fixed' && parseInt(style.zIndex) > 999) {
-                            // 检查是否是阻挡元素
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 100 && rect.height > 100) {
-                                console.log('移除高z-index元素:', el, 'z-index:', style.zIndex);
-                                el.remove();
-                            }
-                        }
-                    });
-                    
-                    // 3. 处理layers容器
-                    const layers = document.querySelector('#layers');
-                    if (layers) {
-                        Array.from(layers.children).forEach(child => {
-                            const style = window.getComputedStyle(child);
-                            if (style.pointerEvents !== 'none') {
-                                console.log('移除layers中的阻挡元素:', child);
-                                child.remove();
-                            }
-                        });
-                    }
-                    
-                    // 4. 移除所有可能的遮罩类
-                    const maskClasses = [
-                        'r-1p0dtai', 'r-1d2f490', 'r-1xcajam', 'r-zchlnj', 'r-ipm5af', 'r-1ffj0ar'
-                    ];
-                    maskClasses.forEach(className => {
-                        document.querySelectorAll('.' + className).forEach(el => {
-                            const style = window.getComputedStyle(el);
-                            if (style.position === 'fixed' || style.position === 'absolute') {
-                                if (parseInt(style.zIndex) > 500) {
-                                    console.log('移除遮罩类元素:', className, el);
-                                    el.style.display = 'none';
-                                    el.style.pointerEvents = 'none';
-                                }
-                            }
-                        });
-                    });
-                    
-                    // 5. 强制恢复body的交互
-                    document.body.style.pointerEvents = 'auto';
-                    document.documentElement.style.pointerEvents = 'auto';
-                    
-                    console.log('✅ 激进清理完成');
-                })();
-            """)
-            return True
-        except Exception as e:
-            self.logger.debug(f"激进清理失败: {e}")
             return False
 
 class ContentFilter:
