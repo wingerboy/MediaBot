@@ -33,7 +33,7 @@
     },
     {
       "action_type": "comment",
-      "count": 50,
+      "count": 20,
       "min_interval": 15.0,
       "max_interval": 40.0,
       "enabled": true,
@@ -46,13 +46,13 @@
         "非常有价值的信息 💯"
       ],
       "conditions": {
-        "min_like_count": 5,
-        "max_like_count": 2000,
+        "min_like_count": 2,
+        "max_like_count": 2000000,
         "min_reply_count": 1,
-        "max_reply_count": 100,
+        "max_reply_count": 100000,
         "min_view_count": 30,
         "min_content_length": 30,
-        "max_content_length": 300,
+        "max_content_length": 3000,
         "has_media": null,
         "exclude_keywords": ["广告", "spam", "promotion","crypto","blockchain","eth","btc","binance","bnb"]
       }

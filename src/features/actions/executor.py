@@ -211,13 +211,13 @@ class ActionExecutor:
             # 执行点赞 - 使用验证有效的安全点击方法
             success = await self.selector.safe_click_element(like_button, "点赞按钮")
             
-            if success:
+                                if success:
                 self.logger.info(f"✅ 点赞成功 (@{username})")
-                return ActionResult.SUCCESS
+                                    return ActionResult.SUCCESS
             else:
                 self.logger.error(f"点赞失败 (@{username})")
                 return ActionResult.ERROR
-                
+            
         except Exception as e:
             self.logger.error(f"点赞操作异常: {e}")
             return ActionResult.ERROR
@@ -435,7 +435,7 @@ class ActionExecutor:
     async def _execute_comment(self, tweet_element: Any, tweet_info: Dict[str, Any], 
                              action_config: ActionConfig) -> ActionResult:
         """执行评论操作 - 增强版，包含完整的可用性检测和状态管理"""
-        username = tweet_info.get('username', 'unknown')
+            username = tweet_info.get('username', 'unknown')
         
         try:
             self.logger.debug(f"准备评论推文: {username}")
@@ -540,12 +540,12 @@ class ActionExecutor:
                                 text = await elem.text_content() or ""
                                 self.logger.debug(f"发现限制提示: {text} (@{username})")
                                 return "restricted_text"
-            except Exception as e:
+                except Exception as e:
                 self.logger.debug(f"限制提示检测失败: {e}")
             
             return "available"
             
-        except Exception as e:
+                except Exception as e:
             self.logger.debug(f"回复可用性检测失败: {e}")
             return "unknown"  # 不确定时假设可用，避免误报
     
@@ -650,9 +650,9 @@ class ActionExecutor:
                         if await elem.is_visible():
                             self.logger.debug(f"检测到限制提示文本: {text_pattern}")
                             return "restricted"
-                except:
-                    continue
-            
+                                except:
+                                    continue
+                            
             # 4. 检查是否缺少输入框（可能表示评论被限制）
             try:
                 input_elements = await dialog.locator('[data-testid="tweetTextarea_0"], div[contenteditable="true"]').all()
@@ -664,8 +664,8 @@ class ActionExecutor:
                 if not visible_inputs:
                     self.logger.debug("模态框中未找到可见的输入框，可能被限制")
                     return "no_input"
-            except:
-                pass
+                                except:
+                                    pass
             
             return "available"
             
@@ -693,8 +693,8 @@ class ActionExecutor:
                             self.logger.debug(f"找到输入框: {selector}")
                             break
                     if input_element:
-                        break
-                except:
+                                break
+                    except:
                     continue
             
             if not input_element:
@@ -706,8 +706,8 @@ class ActionExecutor:
             
             # 先点击确保聚焦
             await input_element.click()
-            await asyncio.sleep(0.3)
-            
+                await asyncio.sleep(0.3)
+                
             # 清空可能的默认内容
             await input_element.clear()
             await asyncio.sleep(0.2)
@@ -729,8 +729,8 @@ class ActionExecutor:
                 await input_element.type(comment_text)
                 await asyncio.sleep(0.5)
                 return True
-            
-        except Exception as e:
+                
+            except Exception as e:
             self.logger.error(f"输入框处理失败: {e}")
             return False
     
@@ -800,8 +800,8 @@ class ActionExecutor:
                 if not dialogs:
                     self.logger.debug(f"✅ 无模态框存在，清理完成 (@{username})")
                     cleanup_success = True
-                    break
-                
+                                    break
+                                    
                 self.logger.debug(f"第{attempt+1}次清理，发现{len(dialogs)}个模态框...")
                 
                 if attempt < 3:
@@ -809,11 +809,11 @@ class ActionExecutor:
                     success = await self.selector.ensure_comment_modal_closed()
                     if success:
                         cleanup_success = True
-                        break
+                            break
                 elif attempt < 5:
                     # 第4-5次：强制方式
                     await self.selector.force_close_modals()
-                else:
+                    else:
                     # 最后一次：终极清理
                     await self._ultimate_modal_cleanup()
                 
@@ -831,7 +831,7 @@ class ActionExecutor:
             
             return final_success
             
-        except Exception as e:
+                except Exception as e:
             self.logger.error(f"模态框清理异常: {e}")
             return False
     
@@ -851,7 +851,7 @@ class ActionExecutor:
                 try:
                     await self.page.mouse.click(x, y)
                     await asyncio.sleep(0.1)
-                except:
+                    except:
                     continue
             
             # 3. 强制移除DOM元素
